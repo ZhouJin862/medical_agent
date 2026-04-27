@@ -1,0 +1,579 @@
+openapi: 3.0.3
+info:
+  title: Medical Agent API
+  description: |
+    慢病健康管理智能体系统 RESTful API
+
+    提供健康评估、风险预测、个性化处方等功能。
+  version: 1.0.0
+  contact:
+    name: Medical Agent Team
+    email: support@medical-agent.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8000
+    description: 开发环境
+  - url: https://api.medical-agent.com
+    description: 生产环境
+
+tags:
+  - name: Chat
+    description: 聊天对话
+  - name: Health
+    description: 健康评估
+  - name: Plan
+    description: 健康计划
+  - name: Skills
+    description: Skill 管理
+
+paths:
+  /api/chat/send:
+    post:
+      tags: [Chat]
+      summary: 发送消息
+      description: 发送用户消息并获取 AI 响应
+      operationId: sendMessage
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+            examples:
+              hypertension_query:
+                summary: 高血压咨询
+                value:
+                  message: "我的血压是135/88，这正常吗？"
+                  patient_id: "patient-001"
+                  vital_signs:
+                    blood_pressure:
+                      systolic: 135
+                      diastolic: 88
+      responses:
+        '200':
+          description: 成功响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendMessageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/chat/consultations/{consultation_id}/messages:
+    get:
+      tags: [Chat]
+      summary: 获取对话历史
+      operationId: getConsultationMessages
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: consultation_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagesResponse'
+
+  /api/health/{patient_id}:
+    get:
+      tags: [Health]
+      summary: 获取健康数据
+      operationId: getHealthData
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: patient_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthDataResponse'
+
+  /api/health/assessments:
+    post:
+      tags: [Health]
+      summary: 创建健康评估
+      operationId: createAssessment
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssessmentRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentResponse'
+
+  /api/plan/{patient_id}:
+    get:
+      tags: [Plan]
+      summary: 获取健康计划
+      operationId: getHealthPlan
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: patient_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthPlanResponse'
+
+  /api/v3/skills:
+    get:
+      tags: [Skills]
+      summary: 列出可用 Skills
+      operationId: listSkills
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillsListResponse'
+
+  /api/v3/skills/{skill_name}:
+    get:
+      tags: [Skills]
+      summary: 获取 Skill 详情
+      operationId: getSkillDetail
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: skill_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkillDetailResponse'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: "Format: Bearer YOUR_API_KEY"
+
+  schemas:
+    SendMessageRequest:
+      type: object
+      required:
+        - message
+        - patient_id
+      properties:
+        message:
+          type: string
+          description: 用户消息内容
+          maxLength: 5000
+          example: "我的血压是135/88，这正常吗？"
+        patient_id:
+          type: string
+          description: 患者ID
+          pattern: '^[a-zA-Z0-9\-_]+$'
+          example: "patient-001"
+        consultation_id:
+          type: string
+          description: 对话ID（用于继续对话）
+        context:
+          type: object
+          description: 额外上下文
+          properties:
+            age:
+              type: integer
+            gender:
+              type: string
+              enum: [male, female, other]
+        vital_signs:
+          $ref: '#/components/schemas/VitalSigns'
+
+    SendMessageResponse:
+      type: object
+      properties:
+        consultation_id:
+          type: string
+        message_id:
+          type: string
+        response:
+          type: string
+        intent:
+          type: string
+        confidence:
+          type: number
+          format: float
+        skills_used:
+          type: array
+          items:
+            type: string
+        related_info:
+          type: object
+        follow_up_suggestions:
+          type: array
+          items:
+            type: string
+
+    MessagesResponse:
+      type: object
+      properties:
+        consultation_id:
+          type: string
+        patient_id:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        pages:
+          type: integer
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+        intent:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    VitalSigns:
+      type: object
+      properties:
+        blood_pressure:
+          type: object
+          properties:
+            systolic:
+              type: integer
+              minimum: 60
+              maximum: 300
+            diastolic:
+              type: integer
+              minimum: 40
+              maximum: 200
+        blood_glucose:
+          type: object
+          properties:
+            fasting:
+              type: number
+              minimum: 2
+              maximum: 30
+            postprandial:
+              type: number
+              minimum: 2
+              maximum: 50
+            hba1c:
+              type: number
+              minimum: 3
+              maximum: 15
+        lipid:
+          type: object
+          properties:
+            total_cholesterol:
+              type: number
+            ldl_c:
+              type: number
+            hdl_c:
+              type: number
+            triglycerides:
+              type: number
+        uric_acid:
+          type: number
+        bmi:
+          type: number
+
+    CreateAssessmentRequest:
+      type: object
+      required:
+        - patient_id
+        - assessment_type
+      properties:
+        patient_id:
+          type: string
+        assessment_type:
+          type: string
+          enum: [basic, comprehensive, specific]
+        vital_signs:
+          $ref: '#/components/schemas/VitalSigns'
+
+    AssessmentResponse:
+      type: object
+      properties:
+        assessment_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        results:
+          type: object
+          properties:
+            conditions:
+              type: array
+              items:
+                type: object
+            recommendations:
+              type: array
+              items:
+                type: string
+
+    HealthDataResponse:
+      type: object
+      properties:
+        patient_id:
+          type: string
+        last_assessment:
+          type: string
+          format: date-time
+        vital_signs:
+          $ref: '#/components/schemas/VitalSigns'
+        risk_assessment:
+          type: object
+          properties:
+            overall_risk:
+              type: string
+              enum: [low, medium, high, very_high]
+            risk_factors:
+              type: array
+              items:
+                type: object
+
+    HealthPlanResponse:
+      type: object
+      properties:
+        plan_id:
+          type: string
+        patient_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        prescriptions:
+          type: object
+          properties:
+            diet:
+              $ref: '#/components/schemas/DietPrescription'
+            exercise:
+              $ref: '#/components/schemas/ExercisePrescription'
+            medication:
+              $ref: '#/components/schemas/MedicationPrescription'
+
+    DietPrescription:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [diet_prescription]
+        title:
+          type: string
+        description:
+          type: string
+        recommendations:
+          type: array
+          items:
+            type: string
+        restrictions:
+          type: array
+          items:
+            type: string
+
+    ExercisePrescription:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [exercise_prescription]
+        title:
+          type: string
+        frequency:
+          type: string
+        duration_per_session:
+          type: string
+        intensity:
+          type: string
+        activities:
+          type: array
+          items:
+            type: string
+
+    MedicationPrescription:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [medication_prescription]
+        medications:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              dosage:
+                type: string
+              frequency:
+                type: string
+              notes:
+                type: string
+
+    SkillsListResponse:
+      type: object
+      properties:
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/Skill'
+
+    Skill:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        category:
+          type: string
+        description:
+          type: string
+        enabled:
+          type: boolean
+        version:
+          type: string
+        endpoints:
+          type: array
+          items:
+            type: string
+
+    SkillDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/Skill'
+        - type: object
+          properties:
+            prompt_template:
+              type: string
+            model_config:
+              type: object
+            input_schema:
+              type: object
+            output_schema:
+              type: object
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+            request_id:
+              type: string
+            timestamp:
+              type: string
+              format: date-time
+
+  responses:
+    BadRequest:
+      description: 请求参数错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: "VALIDATION_ERROR"
+              message: "请求参数验证失败"
+              details:
+                message: ["message 不能为空"]
+
+    Unauthorized:
+      description: 未认证
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: "INVALID_API_KEY"
+              message: "API 密钥无效或已过期"
+
+    ValidationError:
+      description: 数据验证失败
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: "DATA_VALIDATION_FAILED"
+              message: "提交的数据不符合验证规则"
+              details:
+                blood_pressure: ["收缩压必须在 60-300 之间"]

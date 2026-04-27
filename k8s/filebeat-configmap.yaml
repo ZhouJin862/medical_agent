@@ -1,0 +1,81 @@
+# Filebeat ConfigMap for log collection
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: filebeat-config
+  namespace: medical-agent
+data:
+  filebeat.yml: |
+    filebeat.inputs:
+    - type: container
+      enabled: true
+      paths:
+      - /var/log/containers/*.log
+      processors:
+      - add_kubernetes_metadata:
+          host: ${NODE_NAME}
+          matchers:
+          - logs_path:
+              logs_path: "/var/log/containers/"
+      - drop_event:
+          when:
+            equals:
+              kubernetes.container.name: "filebeat"
+      - drop_event:
+          when:
+            regexp:
+              kubernetes.container.name: "^(istio-proxy|istio-init|linkerd-proxy)$"
+
+    # Medical Agent specific log processing
+    - type: log
+      enabled: true
+      paths:
+      - /app/logs/*.log
+      fields:
+        app: medical-agent
+      fields_under_root: true
+      multiline:
+        pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+        negate: true
+        match: after
+      processors:
+      - dissect:
+          tokenizer: '%{timestamp} %{level} %{logger} - %{message}'
+          field: "message"
+          target_fields: ["@timestamp", "log.level", "process.name", "message"]
+
+    # Elasticsearch output
+    output.elasticsearch:
+      hosts: ["elasticsearch:9200"]
+      username: "${ELASTICSEARCH_USERNAME}"
+      password: "${ELASTICSEARCH_PASSWORD}"
+      indices:
+        - index: "medical-agent-%{+yyyy.MM.dd}"
+          when.equals:
+            kubernetes.namespace: "medical-agent"
+      protocol: "https"
+      ssl.enabled: true
+      ssl.verification_mode: certificate
+      ssl.certificate_authorities: ["/etc/filebeat/ca.crt"]
+
+    # Kibana setup
+    setup.kibana:
+      host: "kibana:5601"
+      username: "${ELASTICSEARCH_USERNAME}"
+      password: "${ELASTICSEARCH_PASSWORD}"
+      protocol: "https"
+      ssl.enabled: true
+      ssl.verification_mode: certificate
+      ssl.certificate_authorities: ["/etc/filebeat/ca.crt"]
+
+    # Logging
+    logging.level: info
+    logging.to_files: true
+    logging.files:
+      path: /var/log/filebeat
+      name: filebeat
+      keepfiles: 7
+      permissions: 0644
+
+    # Monitoring
+    monitoring.enabled: true

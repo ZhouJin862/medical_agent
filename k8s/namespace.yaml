@@ -1,0 +1,8 @@
+# Namespace for Medical Agent
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: medical-agent
+  labels:
+    name: medical-agent
+    app: medical-agent

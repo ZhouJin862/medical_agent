@@ -1,0 +1,99 @@
+# Alertmanager ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: medical-agent
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+      slack_api_url: 'YOUR_SLACK_WEBHOOK_URL'
+
+    templates:
+    - '/etc/alertmanager/templates/*.tmpl'
+
+    route:
+      receiver: 'default-receiver'
+      group_by: ['alertname', 'cluster', 'service']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 12h
+
+      routes:
+      # Critical alerts go to both Slack and email
+      - match:
+          severity: critical
+        receiver: 'critical-alerts'
+        continue: true
+
+      # Warning alerts go to Slack only
+      - match:
+          severity: warning
+        receiver: 'warning-alerts'
+
+    receivers:
+    - name: 'default-receiver'
+      slack_configs:
+      - channel: '#medical-agent-alerts'
+        title: '{{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+        send_resolved: true
+
+    - name: 'critical-alerts'
+      slack_configs:
+      - channel: '#medical-agent-critical'
+        color: 'danger'
+        title: '🚨 CRITICAL: {{ .GroupLabels.alertname }}'
+        text: |
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ range .Alerts }}{{ .Annotations.description }}{{ end }}
+          *Severity:* {{ .CommonLabels.severity }}
+          *Namespace:* {{ .CommonLabels.namespace }}
+          *Pod:* {{ .CommonLabels.pod }}
+        send_resolved: true
+        actions:
+        - type: button
+          text: 'View in Grafana'
+          url: '{{ .ExternalURL }}'
+        - type: button
+          text: 'Silence'
+          url: '{{ .ExternalURL }}/#/silences/new?filter=%7B'
+
+      email_configs:
+      - to: 'oncall@medical-agent.com'
+        from: 'alertmanager@medical-agent.com'
+        subject: '🚨 CRITICAL: {{ .GroupLabels.alertname }}'
+        html: |
+          <h2>{{ .CommonAnnotations.summary }}</h2>
+          <p><strong>Description:</strong> {{ range .Alerts }}{{ .Annotations.description }}{{ end }}</p>
+          <p><strong>Severity:</strong> {{ .CommonLabels.severity }}</p>
+          <p><strong>Namespace:</strong> {{ .CommonLabels.namespace }}</p>
+          <p><strong>Pod:</strong> {{ .CommonLabels.pod }}</p>
+          <p><a href="{{ .ExternalURL }}">View in Alertmanager</a></p>
+        send_resolved: true
+
+    - name: 'warning-alerts'
+      slack_configs:
+      - channel: '#medical-agent-alerts'
+        color: 'warning'
+        title: '⚠️ WARNING: {{ .GroupLabels.alertname }}'
+        text: |
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ range .Alerts }}{{ .Annotations.description }}{{ end }}
+        send_resolved: true
+
+    inhibit_rules:
+    # Inhibit warning alerts if critical alert is firing
+    - source_match:
+        severity: 'critical'
+      target_match:
+        severity: 'warning'
+      equal: ['alertname', 'namespace', 'pod']
+
+    # Inhibit alerts if the pod is already terminating
+    - source_match:
+        alertname: 'KubernetesPodTerminating'
+      target_match_re:
+        alertname: 'MedicalAgent.*'
+      equal: ['pod']

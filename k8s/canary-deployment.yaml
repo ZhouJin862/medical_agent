@@ -1,0 +1,123 @@
+# Canary Deployment Configuration
+# This allows gradual rollout of new versions
+
+---
+# Primary Deployment (Stable Version)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: medical-agent-primary
+  namespace: medical-agent
+  labels:
+    app: medical-agent
+    variant: primary
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: medical-agent
+      variant: primary
+  template:
+    metadata:
+      labels:
+        app: medical-agent
+        variant: primary
+        version: stable
+      annotations:
+        prometheus.io/scrape: "true"
+    spec:
+      containers:
+      - name: medical-agent
+        image: medical-agent:1.0.0  # Stable version
+        env:
+        - name: VERSION
+          value: "1.0.0"
+        - name: VARIANT
+          value: "primary"
+        # ... other config from main deployment
+
+---
+# Canary Deployment (New Version)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: medical-agent-canary
+  namespace: medical-agent
+  labels:
+    app: medical-agent
+    variant: canary
+spec:
+  replicas: 1  # Start with 1 replica
+  selector:
+    matchLabels:
+      app: medical-agent
+      variant: canary
+  template:
+    metadata:
+      labels:
+        app: medical-agent
+        variant: canary
+        version: canary
+      annotations:
+        prometheus.io/scrape: "true"
+    spec:
+      containers:
+      - name: medical-agent
+        image: medical-agent:1.1.0  # New version
+        env:
+        - name: VERSION
+          value: "1.1.0"
+        - name: VARIANT
+          value: "canary"
+        # ... other config from main deployment
+
+---
+# Service - Routes to both primary and canary
+apiVersion: v1
+kind: Service
+metadata:
+  name: medical-agent
+  namespace: medical-agent
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: http
+    name: http
+  selector:
+    app: medical-agent
+    # Note: Routes to both primary and canary
+
+---
+# Canary Service - For canary-specific metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: medical-agent-canary
+  namespace: medical-agent
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: http
+    name: http
+  selector:
+    app: medical-agent
+    variant: canary
+
+---
+# Primary Service - For primary-specific metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: medical-agent-primary
+  namespace: medical-agent
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: http
+    name: http
+  selector:
+    app: medical-agent
+    variant: primary

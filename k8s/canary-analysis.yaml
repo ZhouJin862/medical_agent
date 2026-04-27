@@ -1,0 +1,300 @@
+# Canary Analysis Configuration
+# Defines how canary deployments are analyzed and traffic is shifted
+
+apiVersion: flagger.app/v1beta1
+kind: Canary
+metadata:
+  name: medical-agent
+  namespace: medical-agent
+spec:
+  # Deployment reference
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: medical-agent
+
+  # HPA reference (optional)
+  autoscalerRef:
+    apiVersion: autoscaling/v2
+    kind: HorizontalPodAutoscaler
+    name: medical-agent-hpa
+
+  # Service reference
+  serviceRef:
+    name: medical-agent
+    port: 80
+
+  # Analysis configuration
+  analysis:
+    # Schedule for automated analysis
+    interval: 1m
+    # Number of checks to run before promotion
+    iterations: 10
+    # Thresholds for metrics
+    metrics:
+    # HTTP request success rate
+    - name: request-success-rate
+      thresholdRange:
+        min: 99
+      query: |
+        sum(
+          rate(
+            http_requests_total{
+              namespace="{{ namespace }}",
+              deployment="{{ name }}",
+              status!~"5.."
+            }[1m]
+          )
+        ) /
+        sum(
+          rate(
+            http_requests_total{
+              namespace="{{ namespace }}",
+              deployment="{{ name }}"
+            }[1m]
+          )
+        )
+
+    # HTTP request duration
+    - name: request-duration
+      thresholdRange:
+        max: 500
+      query: |
+        histogram_quantile(0.99,
+          sum(
+            rate(
+              http_request_duration_seconds_bucket{
+                namespace="{{ namespace }}",
+              deployment="{{ name }}"
+            }[1m]
+          )
+          by (le)
+        )
+
+    # Error rate
+    - name: error-rate
+      thresholdRange:
+        max: 5
+      query: |
+        sum(
+          rate(
+            http_requests_total{
+              namespace="{{ namespace }}",
+              deployment="{{ name }}",
+              status=~"5.."
+            }[1m]
+        ) /
+        sum(
+          rate(
+            http_requests_total{
+              namespace="{{ namespace }}",
+              deployment="{{ name }}"
+            }[1m]
+          )
+        ) * 100
+        )
+
+    # Webhooks for custom validation
+    webhooks:
+    - name: load-test
+      url: http://flagger-loadtester/
+      timeout: 5s
+      metadata:
+        type: cmd
+        cmd: "hey -z 1 -c 2 -q 10 -m POST http://medical-agent-canary.medical-agent/api/chat/send"
+
+  # Traffic shifting strategy
+  canaryStrategy:
+    # Progressive traffic shifting
+    steps:
+    # Step 1: 10% traffic
+    - setWeight: 10
+      pause:
+        duration: 2m
+    # Step 2: 20% traffic
+    - setWeight: 20
+      pause:
+        duration: 2m
+    # Step 3: 50% traffic
+    - setWeight: 50
+      pause:
+        duration: 2m
+    # Step 4: 100% traffic (promotion)
+    - setWeight: 100
+      pause:
+        duration: 2m
+
+    # Alternative: A/B testing with header-based routing
+    # match:
+    # - headers:
+    #     name: User-Agent
+    #     regex: ".*Firefox.*"
+    #     value: "canary"
+
+  # Prometheus configuration for metrics
+  provider: prometheus
+  prometheus:
+    # Prometheus service address
+    url: http://prometheus.medical-agent.svc.cluster.local:9090
+
+  # Rollback configuration
+  rollback:
+    # Rollback on failed metric checks
+    autoRollback: true
+    # Rollback on HPA scaling events
+    scalingEvents: false
+
+  # Configuration for Blue-Green deployment (alternative)
+  # blueGreen:
+  #   # Service reference for blue-green
+  #   service:
+  #     name: medical-agent
+  #     port: 80
+  #   # Preview service
+  #   previewService:
+  #     name: medical-agent-preview
+  #     port: 80
+  #   # Auto promotion
+  #   autoPromotionEnabled: false
+  #   autoPromotionSeconds: 600
+  #   # Scale down on success
+  #   scaleDownDelaySeconds: 30
+
+---
+# Metrics Template for Custom Analysis
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: canary-metrics
+  namespace: medical-agent
+data:
+  # Success rate metric
+  success-rate.yaml: |
+    name: success_rate
+    template: |
+      sum(
+        rate(
+          http_requests_total{
+            namespace="{{ namespace }}",
+            deployment="{{ name }}",
+            status!~"5.."
+          }[{{ interval }}]
+        )
+      ) /
+      sum(
+        rate(
+          http_requests_total{
+            namespace="{{ namespace }}",
+            deployment="{{ name }}"
+          }[{{ interval }}]
+        )
+      ) * 100
+
+  # P95 latency metric
+  p95-latency.yaml: |
+    name: p95_latency
+    template: |
+      histogram_quantile(0.95,
+        sum(
+          rate(
+            http_request_duration_seconds_bucket{
+              namespace="{{ namespace }}",
+              deployment="{{ name }}"
+            }[{{ interval }}]
+          )
+          by (le)
+        )
+
+  # Database connection pool metric
+  db-pool-usage.yaml: |
+    name: db_pool_usage
+    template: |
+      medical_agent_db_pool_active{namespace="{{ namespace}"} /
+      medical_agent_db_pool_size{namespace="{{ namespace }}"}
+    * 100
+
+---
+# Alerting configuration for canary deployments
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: canary-alerts
+  namespace: medical-agent
+data:
+  alerts.yaml: |
+    groups:
+    - name: canary_deployment_alerts
+      rules:
+      # Canary deployment failure
+      - alert: CanaryDeploymentFailed
+        expr: |
+          flagger_canary_error_total{
+            namespace="medical-agent",
+            name="medical-agent"
+          } > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Canary deployment failed"
+          description: "Canary deployment {{ $labels.name }} failed in namespace {{ $labels.namespace }}"
+
+      # Canary high error rate
+      - alert: CanaryHighErrorRate
+        expr: |
+          sum(
+            rate(
+              http_requests_total{
+                namespace="medical-agent",
+                deployment="medical-agent-canary",
+                status=~"5.."
+              }[5m]
+            )
+          ) /
+          sum(
+            rate(
+              http_requests_total{
+                namespace="medical-agent",
+                deployment="medical-agent-canary"
+              }[5m]
+            )
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Canary high error rate detected"
+          description: "Canary error rate is {{ $value | humanizePercentage }}"
+
+      # Canary latency degradation
+      - alert: CanaryLatencyDegradation
+        expr: |
+          histogram_quantile(0.95,
+            sum(
+              rate(
+                http_request_duration_seconds_bucket{
+                  namespace="medical-agent",
+                  deployment="medical-agent-canary"
+                }[5m]
+              )
+              by (le)
+          ) >
+          histogram_quantile(0.95,
+            sum(
+              rate(
+                http_request_duration_seconds_bucket{
+                  namespace="medical-agent",
+                  deployment="medical-agent-primary"
+                }[5m]
+              )
+              by (le)
+          ) * 1.5
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Canary latency degraded compared to primary"
+          description: "Canary P95 latency is 50% higher than primary"

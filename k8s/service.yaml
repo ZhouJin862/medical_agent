@@ -1,0 +1,43 @@
+# Service for Medical Agent
+apiVersion: v1
+kind: Service
+metadata:
+  name: medical-agent
+  namespace: medical-agent
+  labels:
+    app: medical-agent
+    component: api
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  - name: https
+    port: 443
+    targetPort: http
+    protocol: TCP
+  selector:
+    app: medical-agent
+    component: api
+---
+# Service for metrics (Prometheus scraping)
+apiVersion: v1
+kind: Service
+metadata:
+  name: medical-agent-metrics
+  namespace: medical-agent
+  labels:
+    app: medical-agent
+    component: api
+spec:
+  type: ClusterIP
+  ports:
+  - name: metrics
+    port: 8000
+    targetPort: metrics
+    protocol: TCP
+  selector:
+    app: medical-agent
+    component: api

@@ -1,0 +1,237 @@
+# ConfigMap for Prometheus configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: medical-agent
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      scrape_timeout: 10s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: 'medical-agent-cluster'
+        environment: 'production'
+
+    # Alertmanager configuration
+    alerting:
+      alertmanagers:
+      - static_configs:
+        - targets:
+          - alertmanager:9093
+
+    # Rule files
+    rule_files:
+      - '/etc/prometheus/rules/*.yml'
+
+    # Service discovery configurations
+    scrape_configs:
+      # Prometheus self-monitoring
+      - job_name: 'prometheus'
+        static_configs:
+        - targets: ['localhost:9090']
+
+      # Kubernetes API server
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+        - role: endpoints
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: default;kubernetes;https
+
+      # Kubernetes nodes
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+        - role: node
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+        - action: labelmap
+          regex: __meta_kubernetes_node_label_(.+)
+
+      # Medical Agent API
+      - job_name: 'medical-agent-api'
+        kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+            - medical-agent
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+        - action: labelmap
+          regex: __meta_kubernetes_pod_label_(.+)
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: pod
+
+      # Kubernetes cAdvisor
+      - job_name: 'kubernetes-cadvisor'
+        kubernetes_sd_configs:
+        - role: node
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+        - action: labelmap
+          regex: __meta_kubernetes_node_label_(.+)
+        - source_labels: [__meta_kubernetes_node_name]
+          action: replace
+          target_label: instance
+        - source_labels: [__address__]
+          action: replace
+          target_label: __address__
+          regex: '^(.*):10250'
+          replacement: '${1}:4194'
+
+      # Node Exporter
+      - job_name: 'node-exporter'
+        kubernetes_sd_configs:
+        - role: node
+        relabel_configs:
+        - source_labels: [__address__]
+          regex: '(.*):10250'
+          replacement: '${1}:9100'
+          target_label: __address__
+
+  rules.yml: |
+    groups:
+    - name: medical_agent_alerts
+      interval: 30s
+      rules:
+      # API availability alerts
+      - alert: MedicalAgentDown
+        expr: up{job="medical-agent-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Medical Agent instance is down"
+          description: "{{ $labels.instance }} of job {{ $labels.job }} has been down for more than 1 minute."
+
+      # High error rate alert
+      - alert: MedicalAgentHighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{job="medical-agent-api",status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{job="medical-agent-api"}[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Medical Agent high error rate"
+          description: "Error rate is {{ $value | humanizePercentage }} for {{ $labels.instance }}"
+
+      # High latency alert
+      - alert: MedicalAgentHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="medical-agent-api"}[5m])) by (le)
+          ) > 3
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Medical Agent high latency"
+          description: "P95 latency is {{ $value }}s for {{ $labels.instance }}"
+
+      # Pod restart alert
+      - alert: MedicalAgentPodRestarting
+        expr: |
+          increase(kube_pod_container_status_restarts_total{namespace="medical-agent"}[1h]) > 3
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Medical Agent pod restarting"
+          description: "Pod {{ $labels.pod }} has restarted {{ $value }} times in the last hour."
+
+      # Memory usage alert
+      - alert: MedicalAgentHighMemoryUsage
+        expr: |
+          (
+            container_memory_working_set_bytes{namespace="medical-agent",container="medical-agent"}
+            /
+            container_spec_memory_limit_bytes{namespace="medical-agent",container="medical-agent"}
+          ) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Medical Agent high memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }} for {{ $labels.pod }}"
+
+      # CPU usage alert
+      - alert: MedicalAgentHighCPUUsage
+        expr: |
+          (
+            sum(rate(container_cpu_usage_seconds_total{namespace="medical-agent",container="medical-agent"}[5m]))
+            /
+            sum(container_spec_cpu_quota{namespace="medical-agent",container="medical-agent"} / container_spec_cpu_period{namespace="medical-agent",container="medical-agent"})
+          ) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Medical Agent high CPU usage"
+          description: "CPU usage is {{ $value | humanizePercentage }} for {{ $labels.pod }}"
+
+      # Database connection pool exhaustion
+      - alert: DatabasePoolExhausted
+        expr: |
+          medical_agent_db_pool_active{namespace="medical-agent"}
+          /
+          medical_agent_db_pool_size{namespace="medical-agent"} > 0.9
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Database connection pool nearly exhausted"
+          description: "Pool usage is {{ $value | humanizePercentage }} for {{ $labels.instance }}"
+
+      # LLM API error rate
+      - alert: LLMAPIHighErrorRate
+        expr: |
+          (
+            sum(rate(medical_agent_llm_requests_total{status="error"}[5m]))
+            /
+            sum(rate(medical_agent_llm_requests_total[5m]))
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "LLM API high error rate"
+          description: "LLM API error rate is {{ $value | humanizePercentage }}"
