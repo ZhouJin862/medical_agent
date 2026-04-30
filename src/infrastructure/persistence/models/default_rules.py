@@ -9,15 +9,15 @@ from typing import List, Dict, Any
 DEFAULT_RULES: List[Dict[str, Any]] = [
     # Blood pressure threshold rule
     {
-        "name": "bp_systolic_high",
+        "rule_name": "bp_systolic_high",
         "display_name": "收缩压偏高",
-        "description": "检测收缩压是否偏高（≥140mmHg）",
+        "rule_desc": "检测收缩压是否偏高（≥140mmHg）",
         "rule_type": "threshold",
-        "category": "diagnosis",
+        "rule_category": "diagnosis",
         "target_type": "vital_sign",
         "disease_code": "hypertension",
-        "priority": 100,
-        "enabled": True,
+        "rule_priority": 100,
+        "is_enabled": True,
         "rule_config": {
             "field": "systolic_bp",
             "operator": ">=",
@@ -26,15 +26,15 @@ DEFAULT_RULES: List[Dict[str, Any]] = [
         }
     },
     {
-        "name": "bp_diastolic_high",
+        "rule_name": "bp_diastolic_high",
         "display_name": "舒张压偏高",
-        "description": "检测舒张压是否偏高（≥90mmHg）",
+        "rule_desc": "检测舒张压是否偏高（≥90mmHg）",
         "rule_type": "threshold",
-        "category": "diagnosis",
+        "rule_category": "diagnosis",
         "target_type": "vital_sign",
         "disease_code": "hypertension",
-        "priority": 100,
-        "enabled": True,
+        "rule_priority": 100,
+        "is_enabled": True,
         "rule_config": {
             "field": "diastolic_bp",
             "operator": ">=",
@@ -44,15 +44,15 @@ DEFAULT_RULES: List[Dict[str, Any]] = [
     },
     # Blood glucose threshold rules
     {
-        "name": "fasting_glucose_high",
+        "rule_name": "fasting_glucose_high",
         "display_name": "空腹血糖偏高",
-        "description": "检测空腹血糖是否偏高（≥7.0mmol/L）",
+        "rule_desc": "检测空腹血糖是否偏高（≥7.0mmol/L）",
         "rule_type": "threshold",
-        "category": "diagnosis",
+        "rule_category": "diagnosis",
         "target_type": "vital_sign",
         "disease_code": "diabetes",
-        "priority": 100,
-        "enabled": True,
+        "rule_priority": 100,
+        "is_enabled": True,
         "rule_config": {
             "field": "fasting_glucose",
             "operator": ">=",
@@ -61,15 +61,15 @@ DEFAULT_RULES: List[Dict[str, Any]] = [
         }
     },
     {
-        "name": "hba1c_high",
+        "rule_name": "hba1c_high",
         "display_name": "糖化血红蛋白偏高",
-        "description": "检测糖化血红蛋白是否偏高（≥6.5%）",
+        "rule_desc": "检测糖化血红蛋白是否偏高（≥6.5%）",
         "rule_type": "threshold",
-        "category": "diagnosis",
+        "rule_category": "diagnosis",
         "target_type": "vital_sign",
         "disease_code": "diabetes",
-        "priority": 90,
-        "enabled": True,
+        "rule_priority": 90,
+        "is_enabled": True,
         "rule_config": {
             "field": "hba1c",
             "operator": ">=",
@@ -79,15 +79,15 @@ DEFAULT_RULES: List[Dict[str, Any]] = [
     },
     # BMI threshold rule
     {
-        "name": "bmi_overweight",
+        "rule_name": "bmi_overweight",
         "display_name": "BMI超重",
-        "description": "检测BMI是否超重（≥24）",
+        "rule_desc": "检测BMI是否超重（≥24）",
         "rule_type": "threshold",
-        "category": "diagnosis",
+        "rule_category": "diagnosis",
         "target_type": "vital_sign",
         "disease_code": "obesity",
-        "priority": 100,
-        "enabled": True,
+        "rule_priority": 100,
+        "is_enabled": True,
         "rule_config": {
             "field": "bmi",
             "operator": ">=",
@@ -97,15 +97,15 @@ DEFAULT_RULES: List[Dict[str, Any]] = [
     },
     # Cholesterol threshold rule
     {
-        "name": "total_cholesterol_high",
+        "rule_name": "total_cholesterol_high",
         "display_name": "总胆固醇偏高",
-        "description": "检测总胆固醇是否偏高（≥5.2mmol/L）",
+        "rule_desc": "检测总胆固醇是否偏高（≥5.2mmol/L）",
         "rule_type": "threshold",
-        "category": "diagnosis",
+        "rule_category": "diagnosis",
         "target_type": "vital_sign",
         "disease_code": "dyslipidemia",
-        "priority": 80,
-        "enabled": True,
+        "rule_priority": 80,
+        "is_enabled": True,
         "rule_config": {
             "field": "total_cholesterol",
             "operator": ">=",
@@ -115,15 +115,15 @@ DEFAULT_RULES: List[Dict[str, Any]] = [
     },
     # Uric acid threshold rule
     {
-        "name": "uric_acid_high",
+        "rule_name": "uric_acid_high",
         "display_name": "血尿酸偏高",
-        "description": "检测血尿酸是否偏高（≥420μmol/L）",
+        "rule_desc": "检测血尿酸是否偏高（≥420μmol/L）",
         "rule_type": "threshold",
-        "category": "diagnosis",
+        "rule_category": "diagnosis",
         "target_type": "vital_sign",
         "disease_code": "gout",
-        "priority": 90,
-        "enabled": True,
+        "rule_priority": 90,
+        "is_enabled": True,
         "rule_config": {
             "field": "uric_acid",
             "operator": ">=",
@@ -133,15 +133,15 @@ DEFAULT_RULES: List[Dict[str, Any]] = [
     },
     # Hypertension grade 2 rule
     {
-        "name": "hypertension_grade_2",
+        "rule_name": "hypertension_grade_2",
         "display_name": "高血压2级",
-        "description": "诊断高血压2级（收缩压≥160或舒张压≥100）",
+        "rule_desc": "诊断高血压2级（收缩压≥160或舒张压≥100）",
         "rule_type": "condition",
-        "category": "diagnosis",
+        "rule_category": "diagnosis",
         "target_type": "vital_sign",
         "disease_code": "hypertension",
-        "priority": 95,
-        "enabled": True,
+        "rule_priority": 95,
+        "is_enabled": True,
         "rule_config": {
             "logic": "OR",
             "conditions": [
@@ -160,15 +160,15 @@ DEFAULT_RULES: List[Dict[str, Any]] = [
     },
     # Diabetes risk score rule
     {
-        "name": "diabetes_risk_score",
+        "rule_name": "diabetes_risk_score",
         "display_name": "糖尿病风险评分",
-        "description": "计算2型糖尿病风险评分",
+        "rule_desc": "计算2型糖尿病风险评分",
         "rule_type": "score",
-        "category": "risk_assessment",
+        "rule_category": "risk_assessment",
         "target_type": "combined",
         "disease_code": "diabetes",
-        "priority": 70,
-        "enabled": True,
+        "rule_priority": 70,
+        "is_enabled": True,
         "rule_config": {
             "factors": [
                 {"name": "age", "weight": 0.3, "type": "range", "min": 40, "max": 80},

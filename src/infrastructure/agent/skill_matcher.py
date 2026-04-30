@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 class SkillMatch(str, Enum):
     """Skill match result with confidence."""
-    CHRONIC_DISEASE_RISK = "chronic-disease-risk-assessment"
     CVD_RISK = "cvd-risk-assessment"
     HYPERGLYCEMIA_RISK = "hyperglycemia-risk-assessment"
     HYPERLIPIDEMIA_RISK = "hyperlipidemia-risk-assessment"
@@ -61,15 +60,6 @@ _AVAILABLE_SKILLS: Dict[str, SkillInfo] = {
             "心血管", "心脏病", "中风", "风险评估", "危险分层", "健康评估", "CVD", "心血管病", "心血管疾病",
             # English keywords
             "cardiovascular", "heart disease", "stroke", "cvd", "risk assessment", "primary prevention"
-        ]
-    ),
-    "chronic-disease-risk-assessment": SkillInfo(
-        name="chronic-disease-risk-assessment",
-        description="为健康险企业提供四高一重（高血压、高血糖、高血脂、高尿酸、超重）全病程健康风险评估服务；当用户需要进行慢病风险评估、体检报告分析、心血管风险预测、糖尿病风险预测或健康管理建议时使用",
-        keywords=[
-            "慢病", "四高一重", "高血压", "高血糖", "高血脂", "高尿酸", "超重", "体检报告分析",
-            # English keywords
-            "chronic", "disease", "risk", "assessment", "health", "checkup", "four highs"
         ]
     ),
     "hyperglycemia-risk-assessment": SkillInfo(
@@ -223,12 +213,16 @@ async def match_skill_with_llm(
 
     skills_prompt = "\n".join(skills_list)
 
-    # Create classification prompt
-    system_prompt = f"""你是一个技能路由专家，负责将用户查询匹配到最合适的健康评估技能。
+    # Create classification prompt (load from DB with fallback)
+    from src.domain.shared.services.system_prompt_service import get_system_prompt_service
+    prompt_service = get_system_prompt_service()
+    system_prompt_template = await prompt_service.get_prompt_with_fallback(
+        "skill_matcher_system",
+        fallback="""你是一个技能路由专家，负责将用户查询匹配到最合适的健康评估技能。
 
 ## 可用技能
 
-{skills_prompt}
+{{skills_prompt}}
 
 ## 任务
 
@@ -238,9 +232,8 @@ async def match_skill_with_llm(
 
 1. **心血管相关优先**: 如果查询提到"心血管"、"心脏病"、"中风"、"CVD"、"cardiovascular"、"heart disease"、"stroke"等心血管相关术语，**必须**选择 "cvd-risk-assessment"（即使同时包含其他健康指标）
 2. 如果查询明确提到某个具体的健康问题（如"高血压"、"糖尿病"、"血脂"等），选择对应的风险评估技能
-3. 如果查询是关于综合体检或健康评估，且不涉及心血管病，选择 "chronic-disease-risk-assessment"
-4. 如果查询不属于任何健康评估范围，返回 "none"
-5. 只返回技能名称或 "none"，不要有其他内容
+3. 如果查询不属于任何健康评估范围，返回 "none"
+4. 只返回技能名称或 "none"，不要有其他内容
 
 ## 示例
 
@@ -250,11 +243,14 @@ async def match_skill_with_llm(
 用户输入: "我有高血压，想评估风险"
 输出: hypertension-risk-assessment
 
-用户输入: "帮我分析体检报告"
-输出: chronic-disease-risk-assessment
-
 用户输入: "今天天气怎么样"
-输出: none"""
+输出: none""",
+    )
+    # Format template with skills_prompt
+    try:
+        system_prompt = system_prompt_template.format(skills_prompt=skills_prompt)
+    except (KeyError, IndexError):
+        system_prompt = system_prompt_template
 
     try:
         from src.config.settings import get_settings

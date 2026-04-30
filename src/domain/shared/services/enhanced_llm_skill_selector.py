@@ -219,7 +219,12 @@ class EnhancedLLMSkillSelector:
 
             client = anthropic.Anthropic(api_key=self._anthropic_api_key)
 
-            system_prompt = """You are a medical skill selector with expertise in analyzing user requests.
+            # Load system prompt from DB with hardcoded fallback
+            from src.domain.shared.services.system_prompt_service import get_system_prompt_service
+            prompt_service = get_system_prompt_service()
+            system_prompt = await prompt_service.get_prompt_with_fallback(
+                "skill_selector_system",
+                fallback="""You are a medical skill selector with expertise in analyzing user requests.
 
 ## Your Task
 
@@ -242,8 +247,8 @@ Analyze the user's request and:
 ### Anti-Pattern (DO NOT DO THIS)
 
 User says "做一下健康评估和心血管评估" with BP/sugar/lipid data:
-- ❌ BAD: select chronic-disease + cvd + hypertension + hyperglycemia + hyperlipidemia + obesity + hyperuricemia (7 skills based on data)
-- ✅ GOOD: select chronic-disease-risk-assessment + cvd-risk-assessment (2 skills matching the 2 explicit requests. chronic-disease already covers the "四高一重" sub-domains, so no need for individual hypertension/hyperglycemia/etc. skills)
+- ❌ BAD: select cvd + hypertension + hyperglycemia + hyperlipidemia + obesity + hyperuricemia (6 skills based on data)
+- ✅ GOOD: select cvd-risk-assessment + the most relevant domain-specific skill based on the user's explicit request
 
 ### Execution Strategy
 
@@ -280,10 +285,11 @@ Respond with JSON only:
 - Do NOT select a skill just because the user provided related health data
 - "primary_skill" is the most important single skill (or null if multiple equal skills)
 - "secondary_skills" should include ALL skills that match distinct explicit user requests (e.g. if user asks for both "健康评估" AND "心血管评估", put one as primary and the OTHER as secondary)
-- If a comprehensive skill (e.g. chronic-disease-risk-assessment) is selected, do NOT add its sub-domain skills (hypertension, hyperglycemia, etc.) as secondary
+- If a comprehensive skill is selected, do NOT add its sub-domain skills as secondary
 - "execution_suggestion" should be "parallel" if skills are independent
 - Be specific with skill names - use exact names from the list
-"""
+""",
+            )
 
             user_message = f"""## User Request
 {user_input}
@@ -348,11 +354,8 @@ Analyze this request and select appropriate skills. Respond with JSON in the spe
             # Parse secondary skills (with dedup against comprehensive skills)
             secondary = []
             # If a comprehensive skill is selected, its sub-domain skills are redundant
-            comprehensive_skills = {
-                "chronic-disease-risk-assessment",
-                "chronic-disease-risk",
-            }
-            # Skills that are sub-domains of chronic-disease-risk-assessment
+            comprehensive_skills = set()
+            # Skills that are sub-domains of a comprehensive skill
             # NOTE: cvd-risk-assessment is NOT a sub-domain — it's a separate domain
             sub_domain_skills = {
                 "hypertension-risk-assessment",
@@ -476,11 +479,11 @@ Analyze this request and select appropriate skills. Respond with JSON in the spe
 
         # For each skill, check if it's a "comprehensive" skill whose
         # description indicates it covers multiple sub-domains.
-        # Heuristic: if a skill name contains broad terms like "chronic-disease",
+        # Heuristic: if a skill name contains broad terms like
         # "comprehensive", "overall", "full" etc., treat it as comprehensive
         # and remove other skills whose names are sub-domains.
         broad_indicators = [
-            "chronic-disease", "comprehensive", "overall",
+            "comprehensive", "overall",
             "full-health", "general-health", "multi-domain",
         ]
 

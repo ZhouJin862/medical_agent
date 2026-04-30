@@ -183,7 +183,11 @@ class WebSocketHandler:
         try:
             from src.infrastructure.agent import process_health_query
 
-            result = await process_health_query(user_input, patient_id)
+            result = await process_health_query(
+                user_input,
+                patient_id,
+                session_id=message.get("session_id"),
+            )
 
             # Send response
             await self._send_message(

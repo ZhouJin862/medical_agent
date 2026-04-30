@@ -24,7 +24,6 @@ from src.interface.api.dto.response import (
     StreamingChatErrorChunk,
 )
 from src.infrastructure.session.session_manager import SessionManager, get_session_manager
-from src.infrastructure.agent.graph import MedicalAgent
 from src.infrastructure.agent.state import IntentType
 from src.interface.api.dependencies import get_db
 
@@ -87,8 +86,14 @@ async def _get_health_data_from_pingan(party_id: str) -> Optional[Dict[str, Any]
             # Log what data we got
             if "age" in health_data:
                 logger.info(f"  - Age: {health_data['age']}")
+            if "gender" in health_data:
+                logger.info(f"  - Gender: {health_data['gender']}")
             if "diseaseHistory" in health_data:
                 logger.info(f"  - Diagnoses: {health_data['diseaseHistory']}")
+            if "diseaseLabels" in health_data:
+                logger.info(f"  - Disease labels: {health_data['diseaseLabels']}")
+            if "systolicPressure" in health_data:
+                logger.info(f"  - BP: {health_data['systolicPressure']}/{health_data.get('diastolicPressure')}")
             return health_data
         else:
             logger.warning(f"Ping An API returned non-success: code={api_code}, error={health_data.get('error', health_data.get('info', 'Unknown'))}")
@@ -121,6 +126,9 @@ def _format_retrieved_data_info(health_data: Dict[str, Any]) -> str:
         diagnosis_codes = [code for code in api_data["diseaseHistory"] if code]
         if diagnosis_codes:
             info_parts.append(f"- Medical history codes: {', '.join(diagnosis_codes)}")
+
+    if "diseaseLabels" in api_data and api_data["diseaseLabels"]:
+        info_parts.append(f"- Current diseases: {', '.join(api_data['diseaseLabels'])}")
 
     if "sportRecords" in api_data and api_data["sportRecords"]:
         info_parts.append("- Exercise records: Available")
@@ -170,8 +178,12 @@ async def _generate_llm_response_stream(
         # Add current user message
         messages.append({"role": "user", "content": user_input})
 
-        # Build system prompt
-        base_system_prompt = """你是一个专业的健康管理助手，帮助用户进行健康评估、风险预测和健康管理。
+        # Build system prompt (loaded from DB with fallback)
+        from src.domain.shared.services.system_prompt_service import get_system_prompt_service
+        prompt_service = get_system_prompt_service()
+        base_system_prompt = await prompt_service.get_prompt_with_fallback(
+            "medical_assistant_streaming",
+            fallback="""你是一个专业的健康管理助手，帮助用户进行健康评估、风险预测和健康管理。
 
 你的职责：
 1. 回答用户的健康相关问题
@@ -189,10 +201,17 @@ async def _generate_llm_response_stream(
 - 使用 **粗体** 强调重要信息
 - 使用 > 引用块给出提醒
 
+**关于用户数据来源的优先级**：
+- 系统自动从平安健康档案API获取的数据是**最权威的**，必须优先使用
+- 当系统在提示中提供了"已从平安健康档案获取的数据"时，说明该用户的数据已经成功获取，**不应再当作新用户处理**
+- 即使对话历史中出现过"客户号不匹配"或"新用户"的讨论，只要当前系统提示中包含了该用户的健康数据，就应以API数据为准
+- 不要因为对话历史中的旧信息而质疑或忽略系统提供的API数据
+
 请注意：
 - 你不能替代专业医生的诊断
 - 对于紧急医疗情况，建议用户立即就医
-- 保持回答简洁明了但全面"""
+- 保持回答简洁明了但全面""",
+        )
 
         # Include retrieved data info if available
         if retrieved_data_info:
@@ -201,7 +220,10 @@ async def _generate_llm_response_stream(
 
 {retrieved_data_info}
 
-**特别提醒**: 上面已经列出了从平安健康档案自动获取的信息。请直接使用这些信息进行分析，不要要求用户重复提供这些信息。如果用户提供了客户号，说明他们的健康数据已经获取成功。"""
+**特别提醒**:
+1. 上面已经列出了从平安健康档案自动获取的信息。请直接使用这些信息进行分析，不要要求用户重复提供这些信息。
+2. **当系统提供了平安API数据时，这些数据是最权威和最新的，必须优先于对话历史中的任何推断。** 即使对话历史中提到过"新用户"或"客户号不匹配"，只要本次系统提供了该客户号的健康数据，就说明数据获取成功，应直接使用这些数据进行评估。
+3. 如果用户提供了客户号，说明他们的健康数据已经获取成功。"""
         else:
             logger.warning("No retrieved_data_info available, using base system prompt")
             system_prompt = base_system_prompt
@@ -297,6 +319,7 @@ async def chat_stream(
             retrieved_data_info = ""
             party_id = _extract_party_id(request.message)
             logger.info(f"Party ID extraction result: {party_id}")
+            health_data = None
             if party_id:
                 health_data = await asyncio.wait_for(
                     _get_health_data_from_pingan(party_id),
@@ -317,23 +340,25 @@ async def chat_stream(
             ])
 
             # Build enhanced patient context if data was retrieved
-            # Note: MedicalAgent will handle retrieved data through MCP, so we don't need to pass it manually
+            # Note: SkillsIntegratedAgent will handle retrieved data through MCP, so we don't need to pass it manually
 
-            logger.info(f"Using MedicalAgent for processing request")
+            logger.info(f"Using SkillsIntegratedAgent for processing request")
 
             # Process through SkillsIntegratedAgent (includes multi-skill orchestration)
-            logger.info(f"DEBUG: About to create SkillsIntegratedAgent and call process() for patient_id={request.patient_id}")
             from src.infrastructure.agent.skills_integration import SkillsIntegratedAgent
             agent = SkillsIntegratedAgent()
-            logger.info(f"DEBUG: SkillsIntegratedAgent created, about to call process()")
 
             # Get previous patient_context from session metadata if available
             previous_patient_context = session.metadata.get("patient_context") if session.metadata else None
-            logger.info(f"DEBUG: session_id={session.session_id}, session.metadata exists={session.metadata is not None}")
-            logger.info(f"DEBUG: previous_patient_context exists={previous_patient_context is not None}")
             if previous_patient_context:
-                logger.info(f"DEBUG: Found previous patient_context in session with {len(previous_patient_context.get('vital_signs', {}))} vital signs")
-                logger.info(f"DEBUG: previous vital_signs keys: {list(previous_patient_context.get('vital_signs', {}).keys())}")
+                logger.info(f"Restored previous patient context with {len(previous_patient_context.get('vital_signs', {}))} vital signs")
+
+            # Merge questionnaire answers into health_data if provided
+            if request.questionnaire_answers:
+                from src.infrastructure.agent.nodes.check_basic_questionnaire import map_questionnaire_answers_to_health_data
+                if not health_data:
+                    health_data = {}
+                health_data.update(map_questionnaire_answers_to_health_data(request.questionnaire_answers))
 
             # Pass Ping An data to agent if available
             # Add timeout to prevent frontend from showing "thinking" forever
@@ -343,8 +368,10 @@ async def chat_stream(
                         user_input=request.message,
                         patient_id=request.patient_id,
                         party_id=party_id,
-                        ping_an_health_data=health_data if party_id and health_data else None,
-                        previous_patient_context=previous_patient_context  # Pass previous context
+                        ping_an_health_data=health_data if health_data else None,
+                        previous_patient_context=previous_patient_context,  # Pass previous context
+                        session_id=session.session_id,  # Pass session_id for memory isolation
+                        require_basic_questionnaire=True,
                     ),
                     timeout=120.0  # 2 minute timeout for the entire agent pipeline
                 )
@@ -365,7 +392,7 @@ async def chat_stream(
                 )
                 yield f"data: {end_chunk.model_dump_json()}\n\n"
                 return
-            logger.info(f"DEBUG: agent.process() completed, status={agent_state.status}, intent={agent_state.intent}, final_response={bool(agent_state.final_response)}")
+            logger.info(f"Agent processing complete: intent={agent_state.intent}, skill={agent_state.suggested_skill}, confidence={agent_state.confidence}")
 
             # Extract response and metadata from agent state
             full_response = agent_state.final_response or "抱歉，我无法生成回复。"
@@ -386,7 +413,7 @@ async def chat_stream(
                 logger.info(f"Including skill_result in response: {skill_result['skill_name']}")
 
             logger.info(
-                f"MedicalAgent processing complete: "
+                f"SkillsIntegratedAgent processing complete: "
                 f"intent={intent}, "
                 f"skill={skill_used}, "
                 f"confidence={confidence}"
@@ -422,19 +449,13 @@ async def chat_stream(
                 "confidence": confidence,
             }
 
-            # DEBUG: Log multi-skill data availability
-            logger.info(f"DEBUG multi-skill: multi_skill_selection={agent_state.multi_skill_selection is not None}, execution_plan={agent_state.execution_plan is not None}, multi_skill_result={agent_state.multi_skill_result is not None}")
-
             # Add multi-skill orchestration metadata if present
             if agent_state.multi_skill_selection:
                 assistant_metadata["multi_skill_selection"] = agent_state.multi_skill_selection
-                logger.info(f"DEBUG: Saving multi_skill_selection with {len(agent_state.multi_skill_selection.get('secondary', []))} secondary skills")
             if agent_state.execution_plan:
                 assistant_metadata["execution_plan"] = agent_state.execution_plan
-                logger.info(f"DEBUG: Saving execution_plan with skills: {agent_state.execution_plan.get('skills', [])}")
             if agent_state.multi_skill_result:
                 assistant_metadata["multi_skill_result"] = agent_state.multi_skill_result
-                logger.info(f"DEBUG: Saving multi_skill_result")
 
             session_manager.add_assistant_message(
                 session_id=session.session_id,
@@ -453,7 +474,13 @@ async def chat_stream(
                 multi_skill_selection=agent_state.multi_skill_selection if hasattr(agent_state, 'multi_skill_selection') else None,
                 multi_skill_result=agent_state.multi_skill_result if hasattr(agent_state, 'multi_skill_result') else None,
             )
-            yield f"data: {end_chunk.model_dump_json()}\n\n"
+            # Inject structured_output directly into JSON
+            end_json = end_chunk.model_dump_json()
+            so = getattr(agent_state, 'structured_output', None)
+            if isinstance(so, dict):
+                # Remove trailing }, add structured_output, then close outer object
+                end_json = end_json[:-1] + f',"structured_output":{json.dumps(so, ensure_ascii=False)}' + '}'
+            yield f"data: {end_json}\n\n"
 
         except Exception as e:
             logger.error(f"Error in stream generator: {e}", exc_info=True)

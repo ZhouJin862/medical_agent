@@ -91,7 +91,7 @@ class RuleEngine:
 
         results = []
         for rule in rules:
-            if not rule.enabled:
+            if not rule.is_enabled:
                 continue
 
             start_time = datetime.now()
@@ -112,7 +112,7 @@ class RuleEngine:
                 await self._log_execution(rule, context, result, execution_time, None)
 
             except Exception as e:
-                logger.error(f"Error evaluating rule {rule.name}: {e}")
+                logger.error(f"Error evaluating rule {rule.rule_name}: {e}")
                 execution_time = int((datetime.now() - start_time).total_seconds() * 1000)
 
                 results.append(RuleEvaluationResult(
@@ -160,7 +160,7 @@ class RuleEngine:
 
             # Get standard for this vital sign
             standard = await self._get_vital_sign_standard(sign_name)
-            if not standard or not standard.enabled:
+            if not standard or not standard.is_enabled:
                 continue
 
             # Evaluate risk level
@@ -198,7 +198,7 @@ class RuleEngine:
         """
         # Get scoring rule for this disease
         rule = await self._get_risk_score_rule(disease_code)
-        if not rule or not rule.enabled:
+        if not rule or not rule.is_enabled:
             return {
                 "error": f"No scoring rule found for disease: {disease_code}"
             }
@@ -211,18 +211,18 @@ class RuleEngine:
         disease_code: Optional[str] = None,
     ) -> List[RuleModel]:
         """Load rules from database."""
-        stmt = select(RuleModel).where(RuleModel.enabled == True)
+        stmt = select(RuleModel).where(RuleModel.is_enabled == True)
 
         conditions = []
         if categories:
-            conditions.append(RuleModel.category.in_(categories))
+            conditions.append(RuleModel.rule_category.in_(categories))
         if disease_code:
             conditions.append(RuleModel.disease_code == disease_code)
 
         if conditions:
             stmt = stmt.where(and_(*conditions))
 
-        stmt = stmt.order_by(RuleModel.priority.desc())
+        stmt = stmt.order_by(RuleModel.rule_priority.desc())
 
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
@@ -475,8 +475,8 @@ class RuleEngine:
         """Get vital sign standard by name."""
         stmt = select(VitalSignStandardModel).where(
             and_(
-                VitalSignStandardModel.name == sign_name,
-                VitalSignStandardModel.enabled == True
+                VitalSignStandardModel.standard_name == sign_name,
+                VitalSignStandardModel.is_enabled == True
             )
         )
         result = await self._session.execute(stmt)
@@ -487,7 +487,7 @@ class RuleEngine:
         stmt = select(RiskScoreRuleModel).where(
             and_(
                 RiskScoreRuleModel.disease_code == disease_code,
-                RiskScoreRuleModel.enabled == True
+                RiskScoreRuleModel.is_enabled == True
             )
         )
         result = await self._session.execute(stmt)
@@ -507,7 +507,7 @@ class RuleEngine:
                 rule_id=rule.id,
                 patient_id=context.patient_id,
                 input_data=context.input_data,
-                result=result,
+                exec_result=result,
                 matched=result.get("matched", False),
                 execution_time_ms=execution_time,
                 error_message=error,
@@ -539,7 +539,7 @@ class RuleRepository:
 
     async def update_rule(self, rule_id: str, updates: Dict[str, Any]) -> Optional[RuleModel]:
         """Update an existing rule."""
-        stmt = select(RuleModel).where(RuleModel.id == rule_id)
+        stmt = select(RuleModel).where(RuleModel.id == int(rule_id))
         result = await self._session.execute(stmt)
         rule = result.scalar_one_or_none()
 
@@ -552,7 +552,7 @@ class RuleRepository:
 
     async def get_rule(self, rule_id: str) -> Optional[RuleModel]:
         """Get rule by ID."""
-        stmt = select(RuleModel).where(RuleModel.id == rule_id)
+        stmt = select(RuleModel).where(RuleModel.id == int(rule_id))
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -580,9 +580,9 @@ class RuleRepository:
         count_stmt = select(func.count(RuleModel.id))
         conditions = []
         if enabled_only:
-            conditions.append(RuleModel.enabled == True)
+            conditions.append(RuleModel.is_enabled == True)
         if category:
-            conditions.append(RuleModel.category == category)
+            conditions.append(RuleModel.rule_category == category)
         if disease_code:
             conditions.append(RuleModel.disease_code == disease_code)
 
@@ -598,7 +598,7 @@ class RuleRepository:
         if conditions:
             stmt = stmt.where(and_(*conditions))
 
-        stmt = stmt.order_by(RuleModel.priority.desc())
+        stmt = stmt.order_by(RuleModel.rule_priority.desc())
 
         # Add pagination
         offset = (page - 1) * page_size
@@ -611,7 +611,7 @@ class RuleRepository:
 
     async def delete_rule(self, rule_id: str) -> bool:
         """Delete a rule."""
-        stmt = select(RuleModel).where(RuleModel.id == rule_id)
+        stmt = select(RuleModel).where(RuleModel.id == int(rule_id))
         result = await self._session.execute(stmt)
         rule = result.scalar_one_or_none()
 

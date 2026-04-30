@@ -120,7 +120,10 @@ async def init_database() -> None:
         ConsultationModel,
         MessageModel,
         GuidelineModel,
+        SystemPromptModel,
     )
+    from src.infrastructure.persistence.models.assessment_insight import AssessmentInsightModel
+    from src.infrastructure.persistence.models.questionnaire import QuestionnaireModel
 
     engine = get_engine()
 
@@ -132,6 +135,8 @@ async def init_database() -> None:
         # Initialize default data
         await _init_default_standards(conn)
         await _init_default_rules(conn)
+        await _init_default_prompts(conn)
+        await _init_default_questionnaires(conn)
 
 
 async def _init_default_standards(conn) -> None:
@@ -266,11 +271,66 @@ async def _init_default_rules(conn) -> None:
     for rule_data in rules_data:
         try:
             await conn.execute(RuleModel.__table__.insert().values(**rule_data))
-            logger.info(f"Created rule: {rule_data['name']}")
+            logger.info(f"Created rule: {rule_data['rule_name']}")
         except Exception as e:
-            logger.warning(f"Failed to create rule {rule_data['name']}: {e}")
+            logger.warning(f"Failed to create rule {rule_data['rule_name']}: {e}")
 
     logger.info(f"Initialized {len(rules_data)} default rules")
+
+
+async def _init_default_prompts(conn) -> None:
+    """Initialize default system prompts if table is empty."""
+    from src.infrastructure.persistence.models.system_prompt_models import SystemPromptModel
+    from sqlalchemy import select
+
+    # Check if prompts already exist
+    result = await conn.execute(select(SystemPromptModel).limit(1))
+    if result.scalar():
+        logger.info("System prompts already initialized")
+        return
+
+    from src.infrastructure.persistence.seed_data.system_prompts_seed import get_system_prompt_seeds
+
+    prompts_data = get_system_prompt_seeds()
+
+    for prompt_data in prompts_data:
+        try:
+            await conn.execute(SystemPromptModel.__table__.insert().values(
+                prompt_key=prompt_data["prompt_key"],
+                prompt_desc=prompt_data["prompt_desc"],
+                prompt_content=prompt_data["prompt_content"],
+                prompt_version=1,
+                is_active=True,
+                prompt_variables=prompt_data.get("prompt_variables"),
+            ))
+            logger.info(f"Created system prompt: {prompt_data['prompt_key']}")
+        except Exception as e:
+            logger.warning(f"Failed to create system prompt {prompt_data['prompt_key']}: {e}")
+
+    logger.info(f"Initialized {len(prompts_data)} default system prompts")
+
+
+async def _init_default_questionnaires(conn) -> None:
+    """Initialize default questionnaires if table is empty."""
+    from src.infrastructure.persistence.models.questionnaire import QuestionnaireModel
+    from sqlalchemy import select
+
+    result = await conn.execute(select(QuestionnaireModel).limit(1))
+    if result.scalar():
+        logger.info("Questionnaires already initialized")
+        return
+
+    from src.infrastructure.persistence.seed_data.questionnaire_seed import get_questionnaire_seeds
+
+    questionnaires_data = get_questionnaire_seeds()
+    for q_data in questionnaires_data:
+        try:
+            await conn.execute(QuestionnaireModel.__table__.insert().values(**q_data))
+            logger.info(f"Created questionnaire: {q_data['questionnaire_id']}")
+        except Exception as e:
+            logger.warning(f"Failed to create questionnaire {q_data['questionnaire_id']}: {e}")
+
+    logger.info(f"Initialized {len(questionnaires_data)} default questionnaires")
 
 
 async def close_database() -> None:

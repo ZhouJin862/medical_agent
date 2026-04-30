@@ -300,7 +300,7 @@ async def enable_rule(
     Returns:
         Updated rule data
     """
-    rule = await repo.update_rule(rule_id, {"enabled": True})
+    rule = await repo.update_rule(rule_id, {"is_enabled": True})
     if not rule:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -325,7 +325,7 @@ async def disable_rule(
     Returns:
         Updated rule data
     """
-    rule = await repo.update_rule(rule_id, {"enabled": False})
+    rule = await repo.update_rule(rule_id, {"is_enabled": False})
     if not rule:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -478,8 +478,8 @@ async def list_vital_sign_standards(
     from src.infrastructure.persistence.models.rule_models import VitalSignStandardModel
 
     stmt = select(VitalSignStandardModel).where(
-        VitalSignStandardModel.enabled == True
-    ).order_by(VitalSignStandardModel.name)
+        VitalSignStandardModel.is_enabled == True
+    ).order_by(VitalSignStandardModel.standard_name)
 
     result = await db.execute(stmt)
     standards = result.scalars().all()

@@ -95,11 +95,11 @@ class KnowledgeBaseQueryService:
             # Query guidelines
             query = select(GuidelineModel).where(
                 GuidelineModel.disease_code == disease_code,
-                GuidelineModel.enabled == True,
+                GuidelineModel.is_enabled == True,
             )
 
             if category:
-                query = query.where(GuidelineModel.category == category)
+                query = query.where(GuidelineModel.guideline_category == category)
 
             query = query.limit(limit)
             guideline_result = await session.execute(query)
@@ -112,13 +112,13 @@ class KnowledgeBaseQueryService:
 
                 results.append(SearchResult(
                     source_type="guideline",
-                    source_id=guideline.name,
+                    source_id=guideline.guideline_name,
                     title=guideline.display_name,
-                    category=guideline.category,
+                    category=guideline.guideline_category,
                     relevance_score=1.0,
                     content_preview=preview,
                     metadata={
-                        "version": guideline.version,
+                        "version": guideline.guideline_version,
                         "publisher": guideline.publisher,
                         "year": guideline.publication_year,
                         "evidence_level": guideline.evidence_level,
@@ -147,10 +147,10 @@ class KnowledgeBaseQueryService:
                     title=kb.title,
                     category=kb.knowledge_type.value,
                     relevance_score=1.0,
-                    content_preview=kb.content[:200],
+                    content_preview=kb.kb_content[:200],
                     metadata={
-                        "version": kb.version,
-                        "source": kb.source,
+                        "version": kb.kb_version,
+                        "source": kb.kb_source,
                         "tags": kb.tags or [],
                     }
                 ))
@@ -182,7 +182,7 @@ class KnowledgeBaseQueryService:
             conditions = []
             for symptom in symptoms:
                 conditions.append(
-                    KnowledgeBaseModel.content.contains(symptom)
+                    KnowledgeBaseModel.kb_content.contains(symptom)
                 )
 
             query = select(KnowledgeBaseModel).where(
@@ -198,7 +198,7 @@ class KnowledgeBaseQueryService:
 
             for kb in kb_entries:
                 # Calculate relevance based on symptom matches
-                content_lower = kb.content.lower()
+                content_lower = kb.kb_content.lower()
                 matches = sum(1 for s in symptoms if s.lower() in content_lower)
                 relevance = min(matches / len(symptoms), 1.0)
 
@@ -208,10 +208,10 @@ class KnowledgeBaseQueryService:
                     title=kb.title,
                     category=kb.knowledge_type.value,
                     relevance_score=relevance,
-                    content_preview=kb.content[:200],
+                    content_preview=kb.kb_content[:200],
                     metadata={
-                        "version": kb.version,
-                        "source": kb.source,
+                        "version": kb.kb_version,
+                        "source": kb.kb_source,
                         "matched_symptoms": matches,
                     }
                 ))
@@ -244,7 +244,7 @@ class KnowledgeBaseQueryService:
         async with get_db_session_context() as session:
             # Search guidelines with treatment category
             query = select(GuidelineModel).where(
-                GuidelineModel.enabled == True,
+                GuidelineModel.is_enabled == True,
             )
 
             if disease_code:
@@ -252,8 +252,8 @@ class KnowledgeBaseQueryService:
 
             query = query.where(
                 or_(
-                    GuidelineModel.category == "treatment",
-                    GuidelineModel.category == "comprehensive",
+                    GuidelineModel.guideline_category == "treatment",
+                    GuidelineModel.guideline_category == "comprehensive",
                 )
             )
 
@@ -273,13 +273,13 @@ class KnowledgeBaseQueryService:
 
                 results.append(SearchResult(
                     source_type="guideline",
-                    source_id=guideline.name,
+                    source_id=guideline.guideline_name,
                     title=f"{guideline.display_name} - 治疗指南",
                     category="treatment",
                     relevance_score=relevance,
                     content_preview=str(treatment_content)[:300],
                     metadata={
-                        "version": guideline.version,
+                        "version": guideline.guideline_version,
                         "publisher": guideline.publisher,
                         "pharmacological": "pharmacological" in treatment_content,
                         "non_pharmacological": "non_pharmacological" in treatment_content,
@@ -314,8 +314,8 @@ class KnowledgeBaseQueryService:
         async with get_db_session_context() as session:
             # Search guidelines
             guideline_query = select(GuidelineModel).where(
-                GuidelineModel.category == category,
-                GuidelineModel.enabled == True,
+                GuidelineModel.guideline_category == category,
+                GuidelineModel.is_enabled == True,
             )
 
             if disease_code:
@@ -333,13 +333,13 @@ class KnowledgeBaseQueryService:
 
                 results.append(SearchResult(
                     source_type="guideline",
-                    source_id=guideline.name,
+                    source_id=guideline.guideline_name,
                     title=guideline.display_name,
                     category=category,
                     relevance_score=1.0,
                     content_preview=preview,
                     metadata={
-                        "version": guideline.version,
+                        "version": guideline.guideline_version,
                         "publisher": guideline.publisher,
                     }
                 ))
@@ -365,9 +365,9 @@ class KnowledgeBaseQueryService:
                     title=kb.title,
                     category=kb.knowledge_type.value,
                     relevance_score=1.0,
-                    content_preview=kb.content[:200],
+                    content_preview=kb.kb_content[:200],
                     metadata={
-                        "source": kb.source,
+                        "source": kb.kb_source,
                         "tags": kb.tags or [],
                     }
                 ))
@@ -398,7 +398,7 @@ class KnowledgeBaseQueryService:
         async with get_db_session_context() as session:
             # Search guidelines
             g_query = select(GuidelineModel).where(
-                GuidelineModel.enabled == True,
+                GuidelineModel.is_enabled == True,
             )
 
             if disease_code:
@@ -410,7 +410,7 @@ class KnowledgeBaseQueryService:
 
             for guideline in guidelines:
                 # Search in title, description, and content
-                searchable_text = f"{guideline.display_name} {guideline.description or ''} {str(guideline.guideline_content)}".lower()
+                searchable_text = f"{guideline.display_name} {guideline.guideline_desc or ''} {str(guideline.guideline_content)}".lower()
 
                 if query_lower in searchable_text:
                     # Calculate simple relevance based on position and frequency
@@ -419,13 +419,13 @@ class KnowledgeBaseQueryService:
 
                     results.append(SearchResult(
                         source_type="guideline",
-                        source_id=guideline.name,
+                        source_id=guideline.guideline_name,
                         title=guideline.display_name,
-                        category=guideline.category,
+                        category=guideline.guideline_category,
                         relevance_score=relevance,
-                        content_preview=guideline.description[:200] if guideline.description else "",
+                        content_preview=guideline.guideline_desc[:200] if guideline.guideline_desc else "",
                         metadata={
-                            "version": guideline.version,
+                            "version": guideline.guideline_version,
                             "publisher": guideline.publisher,
                         }
                     ))
@@ -441,7 +441,7 @@ class KnowledgeBaseQueryService:
             kb_entries = kb_result.scalars().all()
 
             for kb in kb_entries:
-                searchable_text = f"{kb.title} {kb.content}".lower()
+                searchable_text = f"{kb.title} {kb.kb_content}".lower()
 
                 if query_lower in searchable_text:
                     position = searchable_text.find(query_lower)
@@ -453,9 +453,9 @@ class KnowledgeBaseQueryService:
                         title=kb.title,
                         category=kb.knowledge_type.value,
                         relevance_score=relevance,
-                        content_preview=kb.content[:200],
+                        content_preview=kb.kb_content[:200],
                         metadata={
-                            "source": kb.source,
+                            "source": kb.kb_source,
                             "tags": kb.tags or [],
                         }
                     ))
@@ -510,7 +510,7 @@ class KnowledgeBaseQueryService:
             result = await session.execute(
                 select(GuidelineModel).where(
                     GuidelineModel.disease_code == disease_code,
-                    GuidelineModel.enabled == True,
+                    GuidelineModel.is_enabled == True,
                 )
             )
             guideline = result.scalar_one_or_none()
@@ -538,7 +538,7 @@ class KnowledgeBaseQueryService:
             result = await session.execute(
                 select(GuidelineModel).where(
                     GuidelineModel.disease_code == disease_code,
-                    GuidelineModel.enabled == True,
+                    GuidelineModel.is_enabled == True,
                 )
             )
             guideline = result.scalar_one_or_none()
@@ -574,7 +574,7 @@ class KnowledgeBaseQueryService:
             result = await session.execute(
                 select(GuidelineModel).where(
                     GuidelineModel.disease_code == disease_code,
-                    GuidelineModel.enabled == True,
+                    GuidelineModel.is_enabled == True,
                 )
             )
             guideline = result.scalar_one_or_none()

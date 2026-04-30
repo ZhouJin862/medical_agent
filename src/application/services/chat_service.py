@@ -104,6 +104,7 @@ class ChatApplicationService:
         ai_response_content = await self._generate_ai_response(
             patient_id=patient_id,
             messages=messages,
+            consultation_id=consultation_id,
         )
 
         # Add AI response
@@ -124,6 +125,7 @@ class ChatApplicationService:
         self,
         patient_id: str,
         messages: list[dict[str, Any]],
+        consultation_id: str | None = None,
     ) -> str:
         """
         Generate AI response using MedicalAgent with skill tracking.
@@ -131,6 +133,7 @@ class ChatApplicationService:
         Args:
             patient_id: Patient identifier
             messages: Conversation history
+            consultation_id: Optional consultation ID for memory isolation
 
         Returns:
             AI-generated response text
@@ -147,6 +150,7 @@ class ChatApplicationService:
                 result = await self._agent.process(
                     user_input=user_input,
                     patient_id=patient_id,
+                    session_id=consultation_id,
                 )
 
                 # The agent already saved to memory via save_memory_node

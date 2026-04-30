@@ -123,7 +123,7 @@ async def create_composite_skill(request: CompositeSkillCreate):
     async for session in get_db_session():
         try:
             # Check if skill already exists
-            existing_stmt = select(SkillModel).where(SkillModel.name == request.name)
+            existing_stmt = select(SkillModel).where(SkillModel.skill_name == request.name)
             existing_result = await session.execute(existing_stmt)
             if existing_result.scalar_one_or_none():
                 raise HTTPException(
@@ -133,11 +133,11 @@ async def create_composite_skill(request: CompositeSkillCreate):
 
             # Validate base skills exist
             base_skill_stmt = select(SkillModel).where(
-                SkillModel.name.in_(request.base_skills),
-                SkillModel.enabled == True,
+                SkillModel.skill_name.in_(request.base_skills),
+                SkillModel.is_enabled == True,
             )
             base_result = await session.execute(base_skill_stmt)
-            found_skills = {s.name for s in base_result.scalars().all()}
+            found_skills = {s.skill_name for s in base_result.scalars().all()}
 
             missing_skills = set(request.base_skills) - found_skills
             if missing_skills:
@@ -158,16 +158,14 @@ async def create_composite_skill(request: CompositeSkillCreate):
             }
 
             # Create skill
-            import uuid
             skill = SkillModel(
-                id=str(uuid.uuid4()),
-                name=request.name,
+                skill_name=request.name,
                 display_name=request.display_name,
-                description=request.description,
-                type=SkillType.GENERIC,
-                enabled=True,
-                version="1.0.0",
-                config=config,
+                skill_desc=request.description,
+                skill_type=SkillType.GENERIC,
+                is_enabled=True,
+                skill_version="1.0.0",
+                skill_config=config,
             )
 
             session.add(skill)
@@ -178,12 +176,12 @@ async def create_composite_skill(request: CompositeSkillCreate):
 
             return CompositeSkillResponse(
                 id=skill.id,
-                name=skill.name,
+                name=skill.skill_name,
                 display_name=skill.display_name,
-                description=skill.description,
-                enabled=skill.enabled,
-                version=skill.version,
-                config=skill.config or {},
+                description=skill.skill_desc,
+                enabled=skill.is_enabled,
+                version=skill.skill_version,
+                config=skill.skill_config or {},
             )
 
         except HTTPException:
@@ -207,24 +205,24 @@ async def list_composite_skills():
     async for session in get_db_session():
         try:
             # Get all skills
-            stmt = select(SkillModel).where(SkillModel.enabled == True)
+            stmt = select(SkillModel).where(SkillModel.is_enabled == True)
             result = await session.execute(stmt)
             all_skills = result.scalars().all()
 
             # Filter for composite skills (have base_skills in config)
             composite_skills = []
             for skill in all_skills:
-                if skill.config and isinstance(skill.config, dict):
-                    if "base_skills" in skill.config:
+                if skill.skill_config and isinstance(skill.skill_config, dict):
+                    if "base_skills" in skill.skill_config:
                         composite_skills.append(
                             CompositeSkillResponse(
                                 id=skill.id,
-                                name=skill.name,
+                                name=skill.skill_name,
                                 display_name=skill.display_name,
-                                description=skill.description or "",
-                                enabled=skill.enabled,
-                                version=skill.version,
-                                config=skill.config,
+                                description=skill.skill_desc or "",
+                                enabled=skill.is_enabled,
+                                version=skill.skill_version,
+                                config=skill.skill_config,
                             )
                         )
 
@@ -247,8 +245,8 @@ async def get_composite_skill(skill_name: str):
     async for session in get_db_session():
         try:
             stmt = select(SkillModel).where(
-                SkillModel.name == skill_name,
-                SkillModel.enabled == True,
+                SkillModel.skill_name == skill_name,
+                SkillModel.is_enabled == True,
             )
             result = await session.execute(stmt)
             skill = result.scalar_one_or_none()
@@ -260,7 +258,7 @@ async def get_composite_skill(skill_name: str):
                 )
 
             # Verify it's a composite skill
-            if not skill.config or "base_skills" not in skill.config:
+            if not skill.skill_config or "base_skills" not in skill.skill_config:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Skill '{skill_name}' is not a composite skill",
@@ -268,12 +266,12 @@ async def get_composite_skill(skill_name: str):
 
             return CompositeSkillResponse(
                 id=skill.id,
-                name=skill.name,
+                name=skill.skill_name,
                 display_name=skill.display_name,
-                description=skill.description or "",
-                enabled=skill.enabled,
-                version=skill.version,
-                config=skill.config,
+                description=skill.skill_desc or "",
+                enabled=skill.is_enabled,
+                version=skill.skill_version,
+                config=skill.skill_config,
             )
 
         except HTTPException:
@@ -292,8 +290,8 @@ async def update_composite_skill(skill_name: str, request: CompositeSkillUpdate)
     async for session in get_db_session():
         try:
             stmt = select(SkillModel).where(
-                SkillModel.name == skill_name,
-                SkillModel.enabled == True,
+                SkillModel.skill_name == skill_name,
+                SkillModel.is_enabled == True,
             )
             result = await session.execute(stmt)
             skill = result.scalar_one_or_none()
@@ -305,7 +303,7 @@ async def update_composite_skill(skill_name: str, request: CompositeSkillUpdate)
                 )
 
             # Verify it's a composite skill
-            if not skill.config or "base_skills" not in skill.config:
+            if not skill.skill_config or "base_skills" not in skill.skill_config:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Skill '{skill_name}' is not a composite skill",
@@ -315,21 +313,21 @@ async def update_composite_skill(skill_name: str, request: CompositeSkillUpdate)
             if request.display_name is not None:
                 skill.display_name = request.display_name
             if request.description is not None:
-                skill.description = request.description
+                skill.skill_desc = request.description
             if request.enabled is not None:
-                skill.enabled = request.enabled
+                skill.is_enabled = request.enabled
 
             # Update config
-            config = skill.config or {}
+            config = skill.skill_config or {}
 
             if request.base_skills is not None:
                 # Validate base skills exist
                 base_skill_stmt = select(SkillModel).where(
-                    SkillModel.name.in_(request.base_skills),
-                    SkillModel.enabled == True,
+                    SkillModel.skill_name.in_(request.base_skills),
+                    SkillModel.is_enabled == True,
                 )
                 base_result = await session.execute(base_skill_stmt)
-                found_skills = {s.name for s in base_result.scalars().all()}
+                found_skills = {s.skill_name for s in base_result.scalars().all()}
 
                 missing_skills = set(request.base_skills) - found_skills
                 if missing_skills:
@@ -351,7 +349,7 @@ async def update_composite_skill(skill_name: str, request: CompositeSkillUpdate)
             if request.execution_mode is not None:
                 config["execution_mode"] = request.execution_mode.value
 
-            skill.config = config
+            skill.skill_config = config
 
             await session.commit()
             await session.refresh(skill)
@@ -360,12 +358,12 @@ async def update_composite_skill(skill_name: str, request: CompositeSkillUpdate)
 
             return CompositeSkillResponse(
                 id=skill.id,
-                name=skill.name,
+                name=skill.skill_name,
                 display_name=skill.display_name,
-                description=skill.description or "",
-                enabled=skill.enabled,
-                version=skill.version,
-                config=skill.config,
+                description=skill.skill_desc or "",
+                enabled=skill.is_enabled,
+                version=skill.skill_version,
+                config=skill.skill_config,
             )
 
         except HTTPException:
@@ -385,7 +383,7 @@ async def delete_composite_skill(skill_name: str):
     async for session in get_db_session():
         try:
             stmt = select(SkillModel).where(
-                SkillModel.name == skill_name,
+                SkillModel.skill_name == skill_name,
             )
             result = await session.execute(stmt)
             skill = result.scalar_one_or_none()
@@ -397,7 +395,7 @@ async def delete_composite_skill(skill_name: str):
                 )
 
             # Soft delete - disable the skill
-            skill.enabled = False
+            skill.is_enabled = False
             await session.commit()
 
             logger.info(f"Deleted composite skill: {skill_name}")
@@ -436,8 +434,8 @@ async def test_composite_skill_execution(
         try:
             # Check skill exists and is composite
             stmt = select(SkillModel).where(
-                SkillModel.name == skill_name,
-                SkillModel.enabled == True,
+                SkillModel.skill_name == skill_name,
+                SkillModel.is_enabled == True,
             )
             result = await session.execute(stmt)
             skill = result.scalar_one_or_none()
@@ -448,7 +446,7 @@ async def test_composite_skill_execution(
                     detail=f"Skill '{skill_name}' not found",
                 )
 
-            if not skill.config or "base_skills" not in skill.config:
+            if not skill.skill_config or "base_skills" not in skill.skill_config:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Skill '{skill_name}' is not a composite skill",

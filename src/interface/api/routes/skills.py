@@ -88,8 +88,8 @@ async def list_skills(
             "version": metadata.version,
             "intent_keywords": [],
             "config": None,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
+            "created_date": datetime.now().isoformat(),
+            "updated_date": datetime.now().isoformat(),
         })
 
     # Get database skills

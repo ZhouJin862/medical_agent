@@ -412,17 +412,17 @@ class CompositeSkillExecutor:
 
             # Load from database
             stmt = select(SkillModel).where(
-                SkillModel.name == skill_name,
-                SkillModel.enabled == True,
+                SkillModel.skill_name == skill_name,
+                SkillModel.is_enabled == True,
             )
             result = await self._repository._session.execute(stmt)
             skill = result.scalar_one_or_none()
 
-            if not skill or not skill.config:
+            if not skill or not skill.skill_config:
                 return None
 
             # Parse composite configuration
-            config = self._parse_composite_config(skill.config)
+            config = self._parse_composite_config(skill.skill_config)
             if config:
                 self._cache[skill_name] = config
                 return config

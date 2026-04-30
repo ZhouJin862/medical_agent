@@ -217,6 +217,69 @@ class ErrorResponse(BaseModel):
     detail: str | None = Field(None, description="Detailed error information")
     timestamp: datetime = Field(default_factory=datetime.now, description="Error timestamp")
 
+
+# ── Standard Assessment API Response Types ──────────────────────────────
+
+
+class PopulationClassification(BaseModel):
+    category: str = Field(..., description="健康 | 亚健康 | 慢病 | 专病")
+    label: str = Field(..., description="Human-readable label")
+    basis: list[str] = Field(default_factory=list, description="Classification criteria")
+
+
+class DataCollectionRecommendation(BaseModel):
+    item: str = Field(..., description="Recommended test / indicator name")
+    reason: str = Field(..., description="Why this data is recommended")
+    priority: str = Field(default="recommended", description="recommended | optional")
+
+
+class AbnormalIndicator(BaseModel):
+    name: str = Field(..., description="Indicator name")
+    value: Any = Field(..., description="Measured value")
+    unit: str = Field(default="", description="Unit of measurement")
+    reference_range: str = Field(default="", description="Normal range")
+    severity: str = Field(default="", description="Severity level")
+    clinical_note: str = Field(default="", description="Clinical interpretation")
+
+
+class DiseasePrediction(BaseModel):
+    disease_name: str = Field(..., description="Predicted disease")
+    probability: str = Field(default="", description="Probability estimate")
+    probability_range: str = Field(default="", description="Probability range")
+    risk_level: str = Field(..., description="低危 | 中危 | 高危 | 很高危")
+    timeframe: str = Field(default="", description="Prediction timeframe")
+    risk_model: str = Field(default="", description="Risk model used")
+    key_contributing_factors: list[str] = Field(default_factory=list)
+
+
+class InterventionPrescription(BaseModel):
+    type: str = Field(..., description="Prescription type (diet, exercise, sleep, monitoring, medication)")
+    title: str = Field(..., description="Human-readable title")
+    content: str = Field(..., description="Prescription details")
+    priority: str = Field(default="medium", description="high | medium | low")
+
+
+class AssessmentResult(BaseModel):
+    population_classification: PopulationClassification | None = None
+    recommended_data_collection: list[DataCollectionRecommendation] = Field(default_factory=list)
+    abnormal_indicators: list[AbnormalIndicator] = Field(default_factory=list)
+    disease_prediction: list[DiseasePrediction] = Field(default_factory=list)
+    intervention_prescriptions: list[InterventionPrescription] = Field(default_factory=list)
+
+
+class AssessmentMetadata(BaseModel):
+    data_source: str = Field(..., description="ping_an_api | request_body")
+    execution_time_ms: int = Field(..., description="Execution time in milliseconds")
+    timestamp: str = Field(..., description="Assessment timestamp")
+    skill_version: str = Field(default="1.0")
+
+
+class AssessmentResponse(BaseModel):
+    """Response model for standard assessment API."""
+    code: int = Field(default=200)
+    success: bool = Field(default=True)
+    data: dict[str, Any] = Field(..., description="Assessment data envelope")
+
     model_config = {"json_schema_extra": {"example": {
         "error": "ValidationError",
         "message": "Invalid request data",
@@ -291,3 +354,122 @@ class StreamingChatErrorChunk(StreamingChatChunk):
 
     type: str = "error"
     error: str
+
+
+# System Prompt Response Types
+
+class SystemPromptResponse(BaseModel):
+    """Response model for a system prompt."""
+
+    id: str = Field(..., description="Prompt version identifier")
+    prompt_key: str = Field(..., description="Unique prompt key")
+    description: str = Field(..., description="Brief description of the prompt")
+    content: str = Field(..., description="Full prompt text")
+    version: int = Field(..., description="Version number")
+    is_active: bool = Field(..., description="Whether this version is active")
+    variables: list[str] | None = Field(None, description="Template variable names")
+    updated_at: str = Field(..., description="Last update timestamp")
+
+    model_config = {"json_schema_extra": {"example": {
+        "id": "abc123",
+        "prompt_key": "medical_assistant_streaming",
+        "description": "流式聊天主 system prompt",
+        "content": "你是一个专业的健康管理助手...",
+        "version": 1,
+        "is_active": True,
+        "variables": None,
+        "updated_at": "2024-01-15T10:00:00",
+    }}}
+
+
+class SystemPromptListItem(BaseModel):
+    """List item for system prompts."""
+
+    id: str = Field(..., description="Prompt version identifier")
+    prompt_key: str = Field(..., description="Unique prompt key")
+    description: str = Field(..., description="Brief description")
+    version: int = Field(..., description="Current active version")
+    variables: list[str] | None = Field(None, description="Template variables")
+    updated_at: str = Field(..., description="Last update timestamp")
+
+
+class SystemPromptListResponse(BaseModel):
+    """Response model for listing system prompts."""
+
+    prompts: list[SystemPromptListItem] = Field(..., description="List of active prompts")
+    total_count: int = Field(..., description="Total number of prompts")
+
+
+class SystemPromptHistoryItem(BaseModel):
+    """History item for a prompt version."""
+
+    id: str = Field(..., description="Version identifier")
+    prompt_key: str = Field(..., description="Prompt key")
+    version: int = Field(..., description="Version number")
+    is_active: bool = Field(..., description="Whether this version is active")
+    description: str = Field(..., description="Description")
+    updated_at: str = Field(..., description="Last update timestamp")
+
+
+class SystemPromptHistoryResponse(BaseModel):
+    """Response model for prompt version history."""
+
+    prompt_key: str = Field(..., description="Prompt key")
+    versions: list[SystemPromptHistoryItem] = Field(..., description="Version history")
+
+
+class SystemPromptUpdateRequest(BaseModel):
+    """Request model for updating a system prompt."""
+
+    content: str = Field(..., description="New prompt content")
+    description: str | None = Field(None, description="Updated description")
+
+
+class QuestionnaireDetailResponse(BaseModel):
+    """Response model for questionnaire detail endpoint."""
+
+    questionnaire_id: str = Field(..., description="Questionnaire business ID")
+    title: str = Field(..., description="Questionnaire title")
+    description: str | None = Field(None, description="Questionnaire description")
+    skill_name: str | None = Field(None, description="Associated skill name")
+    questions: list[dict[str, Any]] = Field(default_factory=list, description="Question list (frontend format)")
+    version: int = Field(default=1, description="Questionnaire version")
+    created_at: str = Field(..., description="Creation timestamp")
+    updated_at: str = Field(..., description="Last update timestamp")
+
+    model_config = {"json_schema_extra": {"example": {
+        "questionnaire_id": "cvd-basic",
+        "title": "心血管基础问卷",
+        "description": "心血管病风险评估基础信息采集",
+        "skill_name": "cvd-risk-assessment",
+        "questions": [],
+        "version": 1,
+        "created_at": "2024-01-15T10:00:00",
+        "updated_at": "2024-01-15T10:00:00",
+    }}}
+
+
+class InsightResponse(BaseModel):
+    """Response model for insight query endpoint."""
+
+    party_id: str = Field(..., description="Customer identifier")
+    skill_name: str = Field(..., description="Assessment skill name")
+    risk_level: str = Field(default="", description="Risk level label")
+    population_classification: dict[str, Any] | None = Field(None)
+    abnormal_indicators: list[dict[str, Any]] = Field(default_factory=list)
+    recommended_data_collection: list[dict[str, Any]] = Field(default_factory=list)
+    disease_prediction: list[dict[str, Any]] = Field(default_factory=list)
+    intervention_prescriptions: list[dict[str, Any]] = Field(default_factory=list)
+    assessed_at: str = Field(..., description="Assessment timestamp")
+
+    model_config = {"json_schema_extra": {"example": {
+        "party_id": "P001",
+        "skill_name": "cvd-risk-assessment",
+        "risk_level": "高危",
+        "population_classification": {"category": "专病", "label": "高危", "basis": []},
+        "abnormal_indicators": [],
+        "recommended_data_collection": [],
+        "disease_prediction": [],
+        "intervention_prescriptions": [],
+        "assessed_at": "2024-01-15T10:30:00",
+    }}}

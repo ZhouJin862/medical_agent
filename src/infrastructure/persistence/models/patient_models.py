@@ -7,7 +7,7 @@ from datetime import date
 from typing import Any
 
 from sqlalchemy import Date, String, Text
-from sqlalchemy.dialects.mysql import CHAR, JSON
+from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.persistence.models.base import BaseModel
@@ -24,12 +24,12 @@ class PatientHealthProfile(BaseModel):
     __tablename__ = "patient_health_profiles"
 
     patient_id: Mapped[str] = mapped_column(
-        CHAR(36),
+        String(36),
         unique=True,
         nullable=False,
         index=True,
     )
-    name: Mapped[str] = mapped_column(
+    patient_name: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
     )

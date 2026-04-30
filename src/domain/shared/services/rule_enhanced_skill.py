@@ -173,10 +173,10 @@ class RuleEnhancedSkillService:
 
     def _parse_rule_config(self, skill: SkillModel) -> RuleEnhancementConfig:
         """Parse rule enhancement config from skill metadata."""
-        if not skill.config or not isinstance(skill.config, dict):
+        if not skill.skill_config or not isinstance(skill.skill_config, dict):
             return RuleEnhancementConfig(enabled=False)
 
-        rule_config_data = skill.config.get("rule_enhancement", {})
+        rule_config_data = skill.skill_config.get("rule_enhancement", {})
         return RuleEnhancementConfig(
             enabled=rule_config_data.get("enabled", False),
             categories=rule_config_data.get("categories"),
@@ -303,7 +303,7 @@ class RuleEnhancedSkillRepository:
         # Use text() for JSON field comparison
         stmt = select(SkillModel).where(
             func.json_extract(
-                SkillModel.config,
+                SkillModel.skill_config,
                 '$.rule_enhancement.enabled'
             ) == 'true'
         )
@@ -318,7 +318,7 @@ class RuleEnhancedSkillRepository:
         """Update skill's rule enhancement configuration."""
         from sqlalchemy import select
 
-        stmt = select(SkillModel).where(SkillModel.id == skill_id)
+        stmt = select(SkillModel).where(SkillModel.id == int(skill_id))
         result = await self._session.execute(stmt)
         skill = result.scalar_one_or_none()
 
@@ -329,8 +329,8 @@ class RuleEnhancedSkillRepository:
         from sqlalchemy.orm.attributes import flag_modified
 
         # Get existing config or create new
-        if skill.config:
-            config = dict(skill.config) if not isinstance(skill.config, dict) else skill.config.copy()
+        if skill.skill_config:
+            config = dict(skill.skill_config) if not isinstance(skill.skill_config, dict) else skill.skill_config.copy()
         else:
             config = {}
 
@@ -346,7 +346,7 @@ class RuleEnhancedSkillRepository:
         }
 
         # Replace the entire config to ensure SQLAlchemy tracks the change
-        skill.config = config
+        skill.skill_config = config
 
         await self._session.commit()
         await self._session.refresh(skill)

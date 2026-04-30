@@ -495,6 +495,9 @@ class CVDAssessmentExecutor:
         # Return in agent-expected format with modules directly in final_output
         # This allows ms_agent_executor.py to extract and format the result correctly
         modules = self._format_modules_output(result, patient)
+        category_zh = self._get_category_zh(result.risk_category)
+        factors = result.key_factors
+        structured_result = self._build_structured_result(result, patient, category_zh, factors)
         return {
             "success": True,
             "status": "completed",
@@ -503,6 +506,7 @@ class CVDAssessmentExecutor:
                 "modules": modules,
                 "total_modules": len(modules)
             },
+            "structured_result": structured_result,
             "risk_assessment": risk_report,
             "patient_data": {
                 "age": patient.age,
@@ -552,6 +556,102 @@ class CVDAssessmentExecutor:
             modules["risk_assessment"]["lifetime_risk_zh"] = "高危" if result.lifetime_risk == "high" else "低危"
 
         return modules
+
+    def _build_structured_result(self, result: 'RiskAssessmentResult', patient: 'PatientData',
+                                  category_zh: str, factors: list) -> Dict[str, Any]:
+        """Build structured result conforming to the unified assessment JSON schema."""
+        # Population classification
+        category = "专病" if "高危" in category_zh else "慢病" if "中危" in category_zh else "亚健康" if "低" in category_zh else "健康"
+        population = {
+            "categories": [{"category": category, "label": category_zh}],
+            "primary_category": category,
+            "basis": factors if factors else [],
+            "score": 0,
+        }
+
+        # Recommended data collection
+        recommended = []
+        _VS_LABELS = {
+            'sbp': '血压', 'dbp': '血压',
+            'fasting_glucose': '空腹血糖', 'hba1c': '糖化血红蛋白',
+            'tc': '总胆固醇', 'tg': '甘油三酯', 'ldl_c': '低密度脂蛋白',
+            'hdl_c': '高密度脂蛋白', 'uric_acid': '血尿酸', 'bmi': 'BMI',
+            'waist_circumference': '腰围',
+        }
+        _seen_labels = set()
+        if patient and hasattr(patient, '__dict__'):
+            for key, label in _VS_LABELS.items():
+                if label in _seen_labels:
+                    continue
+                val = getattr(patient, key, None)
+                if not val:
+                    recommended.append({"item": label, "reason": f"缺少{label}数据，建议补充检测", "priority": "recommended"})
+                    _seen_labels.add(label)
+                else:
+                    _seen_labels.add(label)
+
+        # Abnormal indicators
+        abnormal = []
+        if patient.sbp and patient.sbp >= 140:
+            abnormal.append({"name": "收缩压", "value": patient.sbp, "unit": "mmHg",
+                             "reference": "<140 mmHg", "severity": "high"})
+        if patient.dbp and patient.dbp >= 90:
+            abnormal.append({"name": "舒张压", "value": patient.dbp, "unit": "mmHg",
+                             "reference": "<90 mmHg", "severity": "high"})
+        if patient.tc and patient.tc >= 5.2:
+            abnormal.append({"name": "总胆固醇", "value": patient.tc, "unit": "mmol/L",
+                             "reference": "<5.2 mmol/L", "severity": "elevated"})
+        if patient.ldl_c and patient.ldl_c >= 3.4:
+            abnormal.append({"name": "低密度脂蛋白", "value": patient.ldl_c, "unit": "mmol/L",
+                             "reference": "<3.4 mmol/L", "severity": "elevated"})
+        if patient.hdl_c and patient.hdl_c < 1.0:
+            abnormal.append({"name": "高密度脂蛋白", "value": patient.hdl_c, "unit": "mmol/L",
+                             "reference": "≥1.0 mmol/L", "severity": "low"})
+        if patient.bmi and patient.bmi >= 24:
+            abnormal.append({"name": "BMI", "value": patient.bmi, "unit": "kg/m²",
+                             "reference": "18.5-23.9", "severity": "elevated"})
+
+        # Disease prediction
+        disease_prediction = []
+        if result.ten_year_risk:
+            disease_prediction.append({
+                "disease_name": "心血管病",
+                "probability": result.ten_year_risk_range or "",
+                "risk_level": self._get_category_zh_by_value(result.ten_year_risk),
+                "timeframe": "10年",
+                "risk_model": "China-PAR",
+                "key_contributing_factors": factors,
+            })
+        if result.lifetime_risk:
+            label = "高危" if result.lifetime_risk == "high" else "低危"
+            disease_prediction.append({
+                "disease_name": "心血管病（终生风险）",
+                "probability": "",
+                "risk_level": label,
+                "timeframe": "终生",
+                "risk_model": "China-PAR",
+            })
+
+        # Intervention prescriptions
+        prescriptions = [
+            {"type": "diet", "title": "饮食处方",
+             "content": ["低盐低脂饮食，增加蔬菜水果摄入", "限制钠盐<6g/天", "减少高脂高糖食物"],
+             "priority": "high"},
+            {"type": "exercise", "title": "运动处方",
+             "content": ["每周150分钟中等强度有氧运动（快走、游泳等）", "避免久坐，每次运动不少于30分钟"],
+             "priority": "high"},
+            {"type": "sleep", "title": "睡眠处方",
+             "content": ["保持每日7-8小时规律睡眠", "避免熬夜"],
+             "priority": "medium"},
+        ]
+
+        return {
+            "population_classification": population,
+            "recommended_data_collection": recommended,
+            "abnormal_indicators": abnormal,
+            "disease_prediction": disease_prediction,
+            "intervention_prescriptions": prescriptions,
+        }
 
     def _generate_health_insight(self, result: RiskAssessmentResult, patient: PatientData) -> str:
         """

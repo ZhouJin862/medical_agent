@@ -12,9 +12,8 @@
 import json
 import sys
 import argparse
-import os
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from pathlib import Path
 
 try:
@@ -32,11 +31,6 @@ class TemplateManager:
     
     # 内置模板
     BUILTIN_TEMPLATES = {
-        'default': 'default_template.md',
-        'simple': 'simple_template.md',
-        'insurance': 'insurance_template.md',
-        'clinical': 'clinical_template.md',
-        'personal': 'personal_template.md',
         'report': 'report_template.md'
     }
     
@@ -361,6 +355,92 @@ def _extract_template_vars_from_risk_assessment(data: Dict[str, Any]) -> Dict[st
     }
 
 
+def _build_structured_result(risk_data, overall_risk, health_metrics, input_data):
+    """Build structured result for unified assessment JSON schema."""
+    risk_grade = overall_risk.get('risk_grade', '') or overall_risk.get('risk_level', '')
+    category = _map_risk_to_category(risk_grade)
+
+    # 1. Population classification
+    population_classification = {
+        "categories": [{"category": category, "label": risk_grade or category}],
+        "primary_category": category,
+        "basis": [],
+        "score": 0,
+    }
+
+    # 2. Recommended data collection (check for missing vitals)
+    recommended = []
+    if not risk_data.get('fasting_glucose'):
+        recommended.append({"item": "空腹血糖", "reason": "缺少空腹血糖数据"})
+    if not risk_data.get('hba1c'):
+        recommended.append({"item": "糖化血红蛋白(HbA1c)", "reason": "缺少HbA1c数据"})
+    if not input_data.get('insulin_resistance', {}).get('has_resistance') is not None:
+        recommended.append({"item": "胰岛素抵抗评估", "reason": "需要评估胰岛素抵抗情况"})
+
+    # 3. Abnormal indicators
+    abnormal = []
+    fg = risk_data.get('fasting_glucose')
+    hba1c = risk_data.get('hba1c')
+    if fg:
+        try:
+            fv = float(fg)
+            if fv >= 7.0:
+                abnormal.append({"indicator": "空腹血糖", "value": f"{fg} mmol/L", "reference": "<6.1 mmol/L"})
+            elif fv >= 6.1:
+                abnormal.append({"indicator": "空腹血糖", "value": f"{fg} mmol/L", "reference": "<6.1 mmol/L"})
+        except (ValueError, TypeError):
+            pass
+    if hba1c:
+        try:
+            hv = float(hba1c)
+            if hv >= 6.5:
+                abnormal.append({"indicator": "糖化血红蛋白(HbA1c)", "value": f"{hba1c}%", "reference": "<5.7%"})
+            elif hv >= 5.7:
+                abnormal.append({"indicator": "糖化血红蛋白(HbA1c)", "value": f"{hba1c}%", "reference": "<5.7%"})
+        except (ValueError, TypeError):
+            pass
+
+    # 4. Disease prediction
+    disease_prediction = []
+    glucose_status = risk_data.get('glucose_status', '')
+    if glucose_status == '糖尿病':
+        disease_prediction.append({"disease": "糖尿病", "risk": "高", "description": "已达到糖尿病诊断标准"})
+    elif glucose_status == '糖尿病前期':
+        disease_prediction.append({"disease": "糖尿病前期", "risk": "中高", "description": "血糖高于正常但未达到糖尿病标准"})
+    risk_level = overall_risk.get('risk_level', '')
+    if risk_level == '高风险':
+        disease_prediction.append({"disease": "糖尿病并发症", "risk": "高", "description": "微血管及大血管并发症风险增加"})
+
+    # 5. Intervention prescriptions
+    prescriptions = []
+    prescriptions.append({"type": "饮食", "content": ["低糖饮食，控制碳水化合物摄入总量", "减少精制糖"], "priority": "高"})
+    prescriptions.append({"type": "运动", "content": ["每周150分钟以上中等强度有氧运动"], "priority": "高"})
+    prescriptions.append({"type": "监测", "content": ["定期监测血糖", "包括空腹血糖和餐后血糖"], "priority": "高"})
+    if risk_level in ('高风险',):
+        prescriptions.append({"type": "药物治疗", "content": ["建议在医生指导下进行降糖治疗"], "priority": "高"})
+
+    return {
+        "population_classification": population_classification,
+        "recommended_data_collection": recommended,
+        "abnormal_indicators": abnormal,
+        "disease_prediction": disease_prediction,
+        "intervention_prescriptions": prescriptions,
+    }
+
+
+def _map_risk_to_category(risk_grade):
+    if not risk_grade:
+        return "未知"
+    grade = risk_grade.lower()
+    if "很高危" in grade or "极高" in grade:
+        return "专病"
+    if "高危" in grade or "高" in grade:
+        return "慢病"
+    if "中危" in grade or "中" in grade:
+        return "亚健康"
+    return "健康"
+
+
 def main():
     # 配置 UTF-8 编码输出（Windows 兼容）
     import io
@@ -430,11 +510,15 @@ def main():
 
             if args.format == 'modules':
                 # 分模块输出
+                overall_risk = input_data.get('overall_risk', {})
+                health_metrics = input_data.get('glucose_assessment', {})
+                structured_result = _build_structured_result(template_vars, overall_risk, health_metrics, input_data)
                 result = {
                     "success": True,
                     "template": args.template,
                     "modules": sections,
-                    "total_modules": len(sections)
+                    "total_modules": len(sections),
+                    "structured_result": structured_result
                 }
             elif args.format == 'markdown':
                 # 完整 markdown 输出

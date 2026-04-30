@@ -152,8 +152,12 @@ class LLMSkillSelector:
 
             client = anthropic.Anthropic(api_key=self._anthropic_api_key)
 
-            # Build system prompt
-            system_prompt = """You are a medical skill selector. Your task is to select the most appropriate skill for handling a user request.
+            # Build system prompt (load from DB with fallback)
+            from src.domain.shared.services.system_prompt_service import get_system_prompt_service
+            prompt_service = get_system_prompt_service()
+            system_prompt = await prompt_service.get_prompt_with_fallback(
+                "skill_selector_single_system",
+                fallback="""You are a medical skill selector. Your task is to select the most appropriate skill for handling a user request.
 
 ## Instructions
 
@@ -182,7 +186,8 @@ Respond in JSON format:
 - "should_use_skill" should be true only if confidence >= 0.7
 - For general chat or unclear requests, set "selected_skill" to null and "should_use_skill" to false
 - Consider the specificity of the match (exact match > partial match > general match)
-"""
+""",
+            )
 
             # Build user message
             user_message = f"""## User Request
@@ -406,11 +411,6 @@ class ClaudeSkillsExecutor:
         Returns:
             Execution result with response and metadata
         """
-        # Write marker to confirm this code is running
-        Path("C:/Users/jinit/work/code/medical_agent/debug_execute_skill_marker.txt").write_text(f"execute_skill called: {skill_name}")
-
-        logger.info(f"[DEBUG] execute_skill called for skill_name={skill_name}")
-
         # Load skill definition
         skill_def = await self._repository.get_skill(skill_name)
 
@@ -421,11 +421,8 @@ class ClaudeSkillsExecutor:
                 "skill_name": skill_name,
             }
 
-        logger.info(f"[DEBUG] Skill loaded, checking if workflow skill...")
-
         # Check if this is a workflow-based skill (has scripts directory with SKILL.md workflow)
         is_workflow = self._is_workflow_skill(skill_name)
-        logger.info(f"[DEBUG] _is_workflow_skill({skill_name}) returned: {is_workflow}")
 
         if is_workflow:
             logger.info(f"Executing workflow-based skill: {skill_name} using script executor")
@@ -545,16 +542,6 @@ class ClaudeSkillsExecutor:
                 patient_context=patient_context,
             )
 
-            # Debug: Write to temp file
-            debug_file = Path("C:/Users/jinit/work/code/medical_agent/debug_skill_input.json")
-            debug_file.write_text(json.dumps({
-                "skill_name": skill_name,
-                "user_input": user_input,
-                "patient_context_keys": list(patient_context.keys()) if patient_context else None,
-                "vital_signs_keys": list(patient_context.get("vital_signs", {}).keys()) if patient_context else None,
-                "input_data_vital_signs": input_data.get("vital_signs", {})
-            }, ensure_ascii=False, indent=2))
-
             # Execute skill in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
@@ -566,29 +553,72 @@ class ClaudeSkillsExecutor:
             if result.get("success"):
                 final_output = result.get("final_output", {})
                 if isinstance(final_output, dict):
-                    data = final_output.get("data", {})
+                    # Unwrap nested final_output (skill_md_executor wraps step output)
+                    if "final_output" in final_output and isinstance(final_output["final_output"], dict):
+                        inner = final_output["final_output"]
+                        if "modules" in inner:
+                            final_output = inner
+
+                    # Modules can be at final_output.modules (cvd-risk-assessment)
+                    # or final_output.data.modules
+                    data = final_output.get("data", final_output)
 
                     # Check for incomplete status
-                    if data.get("status") == "incomplete":
-                        # Return incomplete data so agent can prompt user
+                    if isinstance(data, dict) and data.get("status") == "incomplete":
                         return {
                             "success": True,
                             "skill_name": skill_name,
-                            "response": final_output,  # Pass through the whole structure
+                            "response": final_output,
                             "skill_source": "file",
                             "is_incomplete": True,
                         }
 
                     # Check for modules (complete assessment)
-                    if "modules" in data:
-                        # Format modules into a response
+                    if isinstance(data, dict) and "modules" in data:
                         response = self._format_modules_response(data)
+                        structured = dict(data)
+                        if result.get("structured_result"):
+                            structured["structured_result"] = result["structured_result"]
                         return {
                             "success": True,
                             "skill_name": skill_name,
                             "response": response,
                             "skill_source": "file",
-                            "structured_output": data,
+                            "structured_output": structured,
+                        }
+
+                    # If final_output itself has modules (no data wrapper)
+                    if "modules" in final_output:
+                        response = self._format_modules_response(final_output)
+                        structured = dict(final_output)
+                        if result.get("structured_result"):
+                            structured["structured_result"] = result["structured_result"]
+                        return {
+                            "success": True,
+                            "skill_name": skill_name,
+                            "response": response,
+                            "skill_source": "file",
+                            "structured_output": structured,
+                        }
+
+                    # If the skill returned a direct response string
+                    if "response" in final_output and isinstance(final_output["response"], str):
+                        return {
+                            "success": True,
+                            "skill_name": skill_name,
+                            "response": final_output["response"],
+                            "skill_source": "file",
+                        }
+
+                    # Return the final_output as-is if it's a valid dict
+                    if final_output:
+                        logger.info(f"Workflow skill returned unexpected format, passing through: {list(final_output.keys())}")
+                        return {
+                            "success": True,
+                            "skill_name": skill_name,
+                            "response": str(final_output),
+                            "skill_source": "file",
+                            "structured_output": final_output,
                         }
 
             # Handle error or unexpected format
@@ -629,9 +659,6 @@ class ClaudeSkillsExecutor:
             "medical_history": {},
         }
 
-        print(f"[DEBUG LLMSKILL] _build_skill_input_data called")
-        print(f"[DEBUG LLMSKILL] patient_context exists: {patient_context is not None}")
-
         if patient_context:
             # Extract basic info
             if patient_context.get("basic_info"):
@@ -643,21 +670,14 @@ class ClaudeSkillsExecutor:
                     "party_id": basic.get("party_id"),
                     "source": basic.get("source"),
                 }
-                print(f"[DEBUG LLMSKILL] patient_data: {input_data['patient_data']}")
 
             # Extract vital signs
             if patient_context.get("vital_signs"):
                 input_data["vital_signs"] = patient_context["vital_signs"]
-                print(f"[DEBUG LLMSKILL] vital_signs keys: {list(input_data['vital_signs'].keys())}")
-                print(f"[DEBUG LLMSKILL] vital_signs sample: {dict(list(input_data['vital_signs'].items())[:3])}")
-            else:
-                print(f"[DEBUG LLMSKILL] No vital_signs in patient_context")
 
             # Extract medical history
             if patient_context.get("medical_history"):
                 input_data["medical_history"] = patient_context["medical_history"]
-        else:
-            print(f"[DEBUG LLMSKILL] patient_context is None")
 
         return input_data
 
@@ -671,14 +691,41 @@ class ClaudeSkillsExecutor:
         Returns:
             Formatted response string
         """
+        import json as _json
         modules = data.get("modules", {})
         response_parts = []
 
         for section_name, section_content in modules.items():
-            if section_content and section_content.strip():
-                response_parts.append(f"\n## {section_name}\n\n{section_content}")
+            if not section_content:
+                continue
+            if isinstance(section_content, str):
+                if section_content.strip():
+                    response_parts.append(f"\n## {section_name}\n\n{section_content}")
+            elif isinstance(section_content, dict):
+                # Format dict content as structured text
+                response_parts.append(f"\n## {section_name}\n")
+                response_parts.append(self._format_dict_section(section_content))
+            elif isinstance(section_content, list):
+                for item in section_content:
+                    if isinstance(item, str) and item.strip():
+                        response_parts.append(f"- {item}")
 
         return "\n".join(response_parts) if response_parts else "评估完成，但未返回详细内容。"
+
+    def _format_dict_section(self, data: Dict[str, Any], indent: int = 0) -> str:
+        """Format a dict section into readable text."""
+        parts = []
+        prefix = "  " * indent
+        for key, value in data.items():
+            display_key = key.replace("_", " ").title()
+            if isinstance(value, dict):
+                parts.append(f"{prefix}- **{display_key}**:")
+                parts.append(self._format_dict_section(value, indent + 1))
+            elif isinstance(value, list):
+                parts.append(f"{prefix}- **{display_key}**: {', '.join(str(v) for v in value)}")
+            else:
+                parts.append(f"{prefix}- **{display_key}**: {value}")
+        return "\n".join(parts)
 
     def _build_enhanced_prompt(
         self,

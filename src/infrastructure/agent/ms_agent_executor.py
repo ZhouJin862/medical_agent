@@ -13,15 +13,6 @@ MS-Agent ScriptExecutor 集成 - 统一技能执行入口
     # 或通过代码
     from src.infrastructure.agent.skill_executor_factory import set_executor_config
     set_executor_config({"backend": "msagent"})
-
-使用示例：
-    from src.infrastructure.agent.ms_agent_executor import execute_skill_via_msagent
-
-    result = await execute_skill_via_msagent(
-        skill_name="chronic-disease-risk-assessment",
-        user_input="评估我的健康风险",
-        patient_context=patient_context
-    )
 """
 
 import logging
@@ -156,6 +147,9 @@ async def execute_skill_via_backend(
                     "total_modules": final_output.get("total_modules", len(modules)),
                     "backend": backend_name
                 }
+                # 保留脚本输出的 structured_result（CVD 等包含标准格式的 skill）
+                if "structured_result" in final_output and isinstance(final_output["structured_result"], dict):
+                    formatted_result["structured_result"] = final_output["structured_result"]
 
                 return SkillExecutionResult(
                     status_code=200,

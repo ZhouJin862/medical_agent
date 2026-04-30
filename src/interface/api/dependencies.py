@@ -26,7 +26,6 @@ from src.infrastructure.persistence.repositories.health_plan_repository_impl imp
 )
 from src.infrastructure.session.session_manager import SessionManager
 from src.infrastructure.memory.memory_store import MemoryStore
-from src.infrastructure.agent.graph import MedicalAgent
 from src.infrastructure.agent.skills_integration import SkillsIntegratedAgent
 from src.domain.consultation.repositories.consultation_repository import (
     IConsultationRepository,
@@ -92,7 +91,7 @@ async def get_skill_service(
 # Chat application service dependency
 def get_chat_service(
     consultation_repo: IConsultationRepository = Depends(get_consultation_repository),
-    agent: MedicalAgent = Depends(get_medical_agent),
+    agent: SkillsIntegratedAgent = Depends(get_medical_agent),
 ) -> ChatApplicationService:
     """Get chat application service."""
     from src.infrastructure.mcp.client_factory import MCPClientFactory

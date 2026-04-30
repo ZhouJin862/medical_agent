@@ -5,6 +5,13 @@ dependency:
   python:
     - pyyaml==6.0.1
     - requests==2.31.0
+tools:
+  - script: scripts/health_data_validator.py
+    args: ["--input", "$input"]
+  - script: scripts/risk_calculator.py
+    args: ["--input", "$prev_output"]
+  - script: scripts/template_manager.py
+    args: ["--template", "report", "--render", "--format", "modules", "--input", "$prev_output"]
 ---
 
 # 高血脂健康风险评估

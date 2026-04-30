@@ -108,6 +108,7 @@ class AgentState(BaseModel):
     # Input
     user_input: str
     patient_id: str
+    session_id: Optional[str] = Field(default=None, description="当前会话ID，用于隔离不同会话的记忆")
 
     # Ping An health archive
     party_id: Optional[str] = Field(default=None, description="Customer ID from Ping An health archive (客户号)")
@@ -151,6 +152,12 @@ class AgentState(BaseModel):
     # Error handling
     error_message: Optional[str] = None
     retry_count: int = Field(default=0)
+
+    # Basic questionnaire check
+    require_basic_questionnaire: bool = Field(default=False,
+        description="If True, check for missing basic questionnaire fields before skill execution")
+    missing_basic_fields: Optional[List[str]] = Field(default=None,
+        description="Missing basic field names after check. None=not checked, []=all present")
 
     # Metadata
     start_time: Optional[datetime] = None
@@ -196,7 +203,7 @@ class AgentState(BaseModel):
         """Add a skill execution result to the state."""
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"DEBUG add_skill_result: Adding skill_result - success={result.success}, result_data={result.result_data is not None}, skill_name={result.skill_name}")
+        logger.info(f"Adding skill result: {result.skill_name}, success={result.success}")
         self.executed_skills.append(result)
         self.current_skill_result = result
 
@@ -212,13 +219,14 @@ class AgentState(BaseModel):
         }
 
 
-def create_initial_state(user_input: str, patient_id: str) -> AgentState:
+def create_initial_state(user_input: str, patient_id: str, session_id: Optional[str] = None) -> AgentState:
     """
     Create an initial agent state.
 
     Args:
         user_input: User's input message
         patient_id: Patient identifier
+        session_id: Optional session ID for memory isolation (typically consultation_id)
 
     Returns:
         New AgentState instance
@@ -226,6 +234,7 @@ def create_initial_state(user_input: str, patient_id: str) -> AgentState:
     return AgentState(
         user_input=user_input,
         patient_id=patient_id,
+        session_id=session_id,
         status=AgentStatus.IDLE,
         start_time=datetime.now(),
     )

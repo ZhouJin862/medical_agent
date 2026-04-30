@@ -35,6 +35,15 @@ from .patient_models import PatientHealthProfile
 # Import guideline models
 from .guideline_models import GuidelineModel, GuidelineCategory
 
+# Import system prompt models
+from .system_prompt_models import SystemPromptModel
+
+# Import assessment insight models
+from .assessment_insight import AssessmentInsightModel
+
+# Import questionnaire models
+from .questionnaire import QuestionnaireModel
+
 # Export Base and all models
 __all__ = [
     "Base",
@@ -51,4 +60,7 @@ __all__ = [
     "PatientHealthProfile",
     "GuidelineModel",
     "GuidelineCategory",
+    "SystemPromptModel",
+    "AssessmentInsightModel",
+    "QuestionnaireModel",
 ]

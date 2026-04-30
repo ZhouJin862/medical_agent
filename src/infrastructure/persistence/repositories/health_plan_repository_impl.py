@@ -58,7 +58,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
             plan_type=plan_type,
             disease_code=disease_code,
             title=title,
-            description=description,
+            plan_desc=description,
             valid_from=valid_from,
             valid_until=valid_until,
         )
@@ -80,7 +80,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
         stmt = (
             select(HealthPlanModel)
             .where(HealthPlanModel.patient_id == patient_id)
-            .order_by(desc(HealthPlanModel.created_at))
+            .order_by(desc(HealthPlanModel.created_date))
             .limit(1)
         )
         result = await self._session.execute(stmt)
@@ -94,7 +94,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
         stmt = (
             select(HealthPlanModel)
             .where(HealthPlanModel.patient_id == patient_id)
-            .order_by(desc(HealthPlanModel.created_at))
+            .order_by(desc(HealthPlanModel.created_date))
             .limit(limit)
         )
         result = await self._session.execute(stmt)
@@ -108,7 +108,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
         stmt = (
             select(HealthPlanModel)
             .where(HealthPlanModel.disease_code == disease_code)
-            .order_by(desc(HealthPlanModel.created_at))
+            .order_by(desc(HealthPlanModel.created_date))
             .limit(limit)
         )
         result = await self._session.execute(stmt)
@@ -141,8 +141,8 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
             health_plan_id=health_plan_internal_id,
             prescription_type=prescription_type,
             title=title,
-            content=content,
-            priority=priority,
+            prescription_content=content,
+            prescription_priority=priority,
             frequency=frequency,
             notes=notes,
         )
@@ -166,7 +166,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
         stmt = select(PrescriptionModel).where(
             PrescriptionModel.health_plan_id == health_plan_internal_id
         )
-        stmt = stmt.order_by(PrescriptionModel.created_at)
+        stmt = stmt.order_by(PrescriptionModel.created_date)
         result = await self._session.execute(stmt)
         prescriptions = result.scalars().all()
         return [rx.to_dict() for rx in prescriptions]
@@ -192,7 +192,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
                 PrescriptionModel.prescription_type == prescription_type,
             )
         )
-        stmt = stmt.order_by(PrescriptionModel.created_at)
+        stmt = stmt.order_by(PrescriptionModel.created_date)
         result = await self._session.execute(stmt)
         prescriptions = result.scalars().all()
         return [rx.to_dict() for rx in prescriptions]
@@ -208,7 +208,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
     ) -> bool:
         """Update a prescription."""
         stmt = select(PrescriptionModel).where(
-            PrescriptionModel.id == prescription_id
+            PrescriptionModel.id == int(prescription_id)
         )
         result = await self._session.execute(stmt)
         prescription = result.scalar_one_or_none()
@@ -217,9 +217,9 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
             if title is not None:
                 prescription.title = title
             if content is not None:
-                prescription.content = content
+                prescription.prescription_content = content
             if priority is not None:
-                prescription.priority = priority
+                prescription.prescription_priority = priority
             if frequency is not None:
                 prescription.frequency = frequency
             if notes is not None:
@@ -230,7 +230,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
     async def delete_prescription(self, prescription_id: str) -> bool:
         """Delete a prescription."""
         stmt = select(PrescriptionModel).where(
-            PrescriptionModel.id == prescription_id
+            PrescriptionModel.id == int(prescription_id)
         )
         result = await self._session.execute(stmt)
         prescription = result.scalar_one_or_none()
@@ -257,7 +257,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
             if title is not None:
                 health_plan.title = title
             if description is not None:
-                health_plan.description = description
+                health_plan.plan_desc = description
             if valid_from is not None:
                 health_plan.valid_from = valid_from
             if valid_until is not None:
@@ -295,7 +295,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
         hp_stmt = (
             select(HealthPlanModel.id)
             .where(HealthPlanModel.patient_id == patient_id)
-            .order_by(desc(HealthPlanModel.created_at))
+            .order_by(desc(HealthPlanModel.created_date))
             .limit(1)
         )
         hp_result = await self._session.execute(hp_stmt)
@@ -313,7 +313,7 @@ class HealthPlanRepositoryImpl(IHealthPlanRepository):
                     PrescriptionModel.prescription_type == prescription_type,
                 )
             )
-            .order_by(desc(PrescriptionModel.created_at))
+            .order_by(desc(PrescriptionModel.created_date))
             .limit(1)
         )
         result = await self._session.execute(stmt)

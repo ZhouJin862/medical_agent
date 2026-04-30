@@ -154,13 +154,10 @@ class SessionManager:
                 'metadata': session.metadata
             }
 
-            logger.info(f"DEBUG: Saving session {session.session_id} to {session_file}")
-            logger.info(f"DEBUG: session.metadata keys: {list(session.metadata.keys()) if session.metadata else 'None'}")
+            logger.info(f"Saving session {session.session_id} to disk")
 
             with open(session_file, 'w', encoding='utf-8') as f:
                 json.dump(session_data, f, ensure_ascii=False, indent=2)
-
-            logger.info(f"DEBUG: Successfully saved session {session.session_id} to disk")
         except Exception as e:
             logger.error(f"Failed to save session {session.session_id} to disk: {e}")
             import traceback

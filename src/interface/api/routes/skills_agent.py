@@ -25,7 +25,7 @@ class AgentRequest(BaseModel):
     """Request for agent processing."""
     patient_id: str = Field(..., description="Patient identifier")
     message: str = Field(..., description="User message to process")
-    use_legacy: bool = Field(False, description="Use legacy agent instead of skills-integrated")
+    session_id: Optional[str] = Field(None, description="Session ID for memory isolation")
 
 
 class AgentResponse(BaseModel):
@@ -59,26 +59,16 @@ class SkillSelectionResponse(BaseModel):
 # Agent Instances
 # ============================================================================
 
-# Global agent instances (could be moved to dependency injection)
+# Global agent instance (could be moved to dependency injection)
 _skills_agent: Optional[SkillsIntegratedAgent] = None
-_legacy_agent: Optional[object] = None
 
 
 def get_skills_agent() -> SkillsIntegratedAgent:
     """Get or create the skills-integrated agent."""
     global _skills_agent
     if _skills_agent is None:
-        _skills_agent = SkillsIntegratedAgent(use_legacy_graph=False)
+        _skills_agent = SkillsIntegratedAgent()
     return _skills_agent
-
-
-def get_legacy_agent():
-    """Get or create the legacy agent."""
-    global _legacy_agent
-    if _legacy_agent is None:
-        from src.infrastructure.agent import MedicalAgent
-        _legacy_agent = MedicalAgent()
-    return _legacy_agent
 
 
 # ============================================================================
@@ -98,15 +88,13 @@ async def process_with_agent(
     """
     try:
         # Select agent
-        if request.use_legacy:
-            agent = get_legacy_agent()
-        else:
-            agent = get_skills_agent()
+        agent = get_skills_agent()
 
         # Process request
         result = await agent.process(
             user_input=request.message,
             patient_id=request.patient_id,
+            session_id=request.session_id,
         )
 
         return AgentResponse(
@@ -230,9 +218,8 @@ async def clear_agent_cache(background_tasks: BackgroundTasks):
     def do_clear():
         """Background cache clear task."""
         try:
-            global _skills_agent, _legacy_agent
+            global _skills_agent
             _skills_agent = None
-            _legacy_agent = None
 
             from src.domain.shared.services.unified_skills_repository import UnifiedSkillsRepository
             from src.infrastructure.database import get_db_session

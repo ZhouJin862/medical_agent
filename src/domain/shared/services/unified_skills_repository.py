@@ -65,19 +65,19 @@ class DatabaseSkillAdapter:
     def to_metadata(skill: SkillModel) -> SkillMetadata:
         """Convert database skill to metadata."""
         # Use a dummy directory for database skills
-        dummy_dir = Path(f"/db_skills/{skill.name}")
+        dummy_dir = Path(f"/db_skills/{skill.skill_name}")
 
         return SkillMetadata(
-            name=skill.name,
-            description=skill.description or skill.display_name,
+            name=skill.skill_name,
+            description=skill.skill_desc or skill.display_name,
             directory=dummy_dir,
             source=SkillSource.DATABASE,
-            enabled=skill.enabled,
-            version=skill.version,
+            enabled=skill.is_enabled,
+            version=skill.skill_version,
             # Map database fields to tags
             tags=skill.intent_keywords or [],
             # Map skill type to layer
-            layer=DatabaseSkillAdapter._map_type_to_layer(skill.type),
+            layer=DatabaseSkillAdapter._map_type_to_layer(skill.skill_type.value if skill.skill_type else "generic"),
         )
 
     @staticmethod
@@ -87,8 +87,8 @@ class DatabaseSkillAdapter:
 
         # Build content from database fields
         content = f"# {skill.display_name}\n\n"
-        if skill.description:
-            content += f"{skill.description}\n\n"
+        if skill.skill_desc:
+            content += f"{skill.skill_desc}\n\n"
 
         # Add intent keywords
         if skill.intent_keywords:
@@ -96,8 +96,8 @@ class DatabaseSkillAdapter:
             content += ", ".join(skill.intent_keywords) + "\n\n"
 
         # Add rule enhancement info if present
-        if skill.config and skill.config.get("rule_enhancement"):
-            rule_config = skill.config["rule_enhancement"]
+        if skill.skill_config and skill.skill_config.get("rule_enhancement"):
+            rule_config = skill.skill_config["rule_enhancement"]
             if rule_config.get("enabled"):
                 content += "## Rule Enhancement\n\n"
                 content += f"- Categories: {', '.join(rule_config.get('categories', []))}\n"
@@ -348,25 +348,25 @@ class UnifiedSkillsRepository:
 
         # Add database skills (avoid duplicates)
         try:
-            stmt = select(SkillModel).where(SkillModel.enabled == True)
+            stmt = select(SkillModel).where(SkillModel.is_enabled == True)
             result = await self._session.execute(stmt)
             db_skills = result.scalars().all()
 
             for skill in db_skills:
                 # Skip if file skill with same name exists
-                if skill.name in self._unified_cache:
+                if skill.skill_name in self._unified_cache:
                     continue
 
-                self._unified_cache[skill.name] = SkillInfo(
+                self._unified_cache[skill.skill_name] = SkillInfo(
                     id=str(skill.id),
-                    name=skill.name,
+                    name=skill.skill_name,
                     source=SkillSource.DATABASE,
-                    description=skill.description or skill.display_name,
-                    enabled=skill.enabled,
-                    layer=DatabaseSkillAdapter._map_type_to_layer(skill.type),
+                    description=skill.skill_desc or skill.display_name,
+                    enabled=skill.is_enabled,
+                    layer=DatabaseSkillAdapter._map_type_to_layer(skill.skill_type.value if skill.skill_type else "generic"),
                     metadata={
                         "display_name": skill.display_name,
-                        "version": skill.version,
+                        "version": skill.skill_version,
                         "intent_keywords": skill.intent_keywords,
                     },
                 )
@@ -381,8 +381,8 @@ class UnifiedSkillsRepository:
         try:
             # Try by name first
             stmt = select(SkillModel).where(
-                SkillModel.name == skill_id,
-                SkillModel.enabled == True,
+                SkillModel.skill_name == skill_id,
+                SkillModel.is_enabled == True,
             )
             result = await self._session.execute(stmt)
             skill = result.scalar_one_or_none()
@@ -390,8 +390,8 @@ class UnifiedSkillsRepository:
             if not skill:
                 # Try by ID
                 stmt = select(SkillModel).where(
-                    SkillModel.id == skill_id,
-                    SkillModel.enabled == True,
+                    SkillModel.id == int(skill_id),
+                    SkillModel.is_enabled == True,
                 )
                 result = await self._session.execute(stmt)
                 skill = result.scalar_one_or_none()

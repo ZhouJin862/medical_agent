@@ -347,12 +347,12 @@ class SkillPackageManager:
 
         # Collect database skills
         if options.include_database_skills:
-            stmt = select(SkillModel).where(SkillModel.enabled == True)
+            stmt = select(SkillModel).where(SkillModel.is_enabled == True)
             db_result = await session.execute(stmt)
             for skill in db_result.scalars().all():
                 # Check if in filter (if filter specified)
-                if options.skills is None or skill.name in options.skills:
-                    db_skills.append(skill.name)
+                if options.skills is None or skill.skill_name in options.skills:
+                    db_skills.append(skill.skill_name)
 
         return file_skills, db_skills
 
@@ -411,8 +411,8 @@ class SkillPackageManager:
 
         for skill_name in skill_names:
             stmt = select(SkillModel).where(
-                SkillModel.name == skill_name,
-                SkillModel.enabled == True,
+                SkillModel.skill_name == skill_name,
+                SkillModel.is_enabled == True,
             )
             result = await session.execute(stmt)
             skill = result.scalar_one_or_none()
@@ -420,15 +420,15 @@ class SkillPackageManager:
             if skill:
                 db_skills_data.append({
                     "id": str(skill.id),
-                    "name": skill.name,
+                    "name": skill.skill_name,
                     "display_name": skill.display_name,
-                    "description": skill.description,
-                    "type": skill.type.value,
+                    "description": skill.skill_desc,
+                    "type": skill.skill_type.value,
                     "category": skill.category.value if skill.category else None,
-                    "enabled": skill.enabled,
-                    "version": skill.version,
+                    "enabled": skill.is_enabled,
+                    "version": skill.skill_version,
                     "intent_keywords": skill.intent_keywords,
-                    "config": skill.config,
+                    "config": skill.skill_config,
                 })
 
         # Write to file
@@ -771,7 +771,7 @@ class SkillPackageManager:
                 try:
                     # Check if already exists
                     existing_stmt = select(SkillModel).where(
-                        SkillModel.name == skill_name
+                        SkillModel.skill_name == skill_name
                     )
                     existing_result = await session.execute(existing_stmt)
                     existing = existing_result.scalar_one_or_none()
@@ -790,25 +790,24 @@ class SkillPackageManager:
 
                         # Update existing
                         existing.display_name = skill_data["display_name"]
-                        existing.description = skill_data["description"]
-                        existing.type = SkillType(skill_data["type"])
-                        existing.enabled = skill_data["enabled"]
-                        existing.version = skill_data["version"]
+                        existing.skill_desc = skill_data["description"]
+                        existing.skill_type = SkillType(skill_data["type"])
+                        existing.is_enabled = skill_data["enabled"]
+                        existing.skill_version = skill_data["version"]
                         existing.intent_keywords = skill_data["intent_keywords"]
-                        existing.config = skill_data["config"]
+                        existing.skill_config = skill_data["config"]
                     else:
                         # Create new
                         import uuid
                         skill = SkillModel(
-                            id=skill_data.get("id") or str(uuid.uuid4()),
-                            name=skill_data["name"],
+                            skill_name=skill_data["name"],
                             display_name=skill_data["display_name"],
-                            description=skill_data["description"],
-                            type=SkillType(skill_data["type"]),
-                            enabled=skill_data["enabled"],
-                            version=skill_data["version"],
+                            skill_desc=skill_data["description"],
+                            skill_type=SkillType(skill_data["type"]),
+                            is_enabled=skill_data["enabled"],
+                            skill_version=skill_data["version"],
                             intent_keywords=skill_data["intent_keywords"],
-                            config=skill_data["config"],
+                            skill_config=skill_data["config"],
                         )
                         session.add(skill)
 
@@ -856,14 +855,14 @@ async def get_available_skills_for_export(
 
     # Get database skills
     db_skills = []
-    stmt = select(SkillModel).where(SkillModel.enabled == True)
+    stmt = select(SkillModel).where(SkillModel.is_enabled == True)
     result = await session.execute(stmt)
     for skill in result.scalars().all():
         db_skills.append({
-            "name": skill.name,
-            "description": skill.description or skill.display_name,
+            "name": skill.skill_name,
+            "description": skill.skill_desc or skill.display_name,
             "source": "database",
-            "type": skill.type.value,
+            "type": skill.skill_type.value,
         })
 
     return {

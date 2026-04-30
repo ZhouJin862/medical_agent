@@ -1,5 +1,5 @@
 """
-Skills Integration - Integrates SkillsRegistry with MedicalAgent.
+Skills Integration - Integrates SkillsRegistry with the agent workflow.
 
 Provides updated nodes and utilities for LLM-based skill selection
 and Claude Skills execution (including composite skills).
@@ -32,7 +32,7 @@ from src.domain.shared.services.composite_skill_executor import (
 from src.domain.shared.services.unified_skills_repository import (
     UnifiedSkillsRepository,
 )
-from src.infrastructure.agent.state import AgentState, SkillExecutionResult, IntentType
+from src.infrastructure.agent.state import AgentState, AgentStatus, SkillExecutionResult, IntentType, PatientContext, ConversationMemory
 from src.infrastructure.database import get_db_session
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,11 @@ async def classify_intent_with_llm_node(state: AgentState) -> AgentState:
     state.current_step = "classify_intent"
 
     try:
+        # Skip classification if skill is already specified (e.g. standard API)
+        if state.suggested_skill:
+            logger.info(f"Skill pre-specified: {state.suggested_skill}, skipping LLM classification")
+            return state
+
         # Check for @skill_name syntax (direct invocation)
         if state.user_input.strip().startswith("@"):
             parts = state.user_input.strip().split(maxsplit=1)
@@ -321,25 +326,25 @@ async def _check_composite_skill(
         from src.infrastructure.persistence.models.skill_models import SkillModel
 
         stmt = select(SkillModel).where(
-            SkillModel.name == skill_name,
-            SkillModel.enabled == True,
+            SkillModel.skill_name == skill_name,
+            SkillModel.is_enabled == True,
         )
         result = await session.execute(stmt)
         skill = result.scalar_one_or_none()
 
-        if skill and skill.config:
+        if skill and skill.skill_config:
             # Check if this is a composite skill configuration
-            base_skills = skill.config.get("base_skills")
+            base_skills = skill.skill_config.get("base_skills")
             if base_skills and isinstance(base_skills, list):
                 # Parse composite configuration
                 return CompositeSkillConfig(
                     base_skills=base_skills,
-                    override_settings=skill.config.get("override_settings", {}),
-                    business_rules=skill.config.get("business_rules", {}),
-                    workflow_config=skill.config.get("workflow_config", {}),
-                    display_name=skill.config.get("display_name", skill.display_name),
-                    response_style=skill.config.get("response_style", "standard"),
-                    execution_mode=skill.config.get("execution_mode", "sequential"),
+                    override_settings=skill.skill_config.get("override_settings", {}),
+                    business_rules=skill.skill_config.get("business_rules", {}),
+                    workflow_config=skill.skill_config.get("workflow_config", {}),
+                    display_name=skill.skill_config.get("display_name", skill.display_name),
+                    response_style=skill.skill_config.get("response_style", "standard"),
+                    execution_mode=skill.skill_config.get("execution_mode", "sequential"),
                 )
     except Exception as e:
         logger.error(f"Error checking composite skill: {e}")
@@ -581,11 +586,6 @@ async def _execute_single_skill(
     Returns:
         True if execution succeeded, False otherwise
     """
-    from pathlib import Path
-    Path("C:/Users/jinit/work/code/medical_agent/debug_execute_claude_skill.txt").write_text(
-        f"execute_claude_skill called: {state.suggested_skill}"
-    )
-
     executor = ClaudeSkillsExecutor(session)
 
     # Prepare context
@@ -612,10 +612,18 @@ async def _execute_single_skill(
     execution_time = int((time.time() - start_time) * 1000)
 
     # Create skill result
+    # Use structured_output (dict with modules) for result_data when available,
+    # so downstream aggregate_results_node can properly extract modules.
+    # Fall back to response (string) otherwise.
+    structured_output = result.get("structured_output")
+    result_data = structured_output if (
+        structured_output and isinstance(structured_output, dict) and "modules" in structured_output
+    ) else result.get("response")
+
     skill_result = SkillExecutionResult(
         skill_name=state.suggested_skill,
         success=result.get("success", False),
-        result_data=result.get("response"),
+        result_data=result_data,
         error=result.get("error"),
         execution_time=execution_time,
     )
@@ -623,8 +631,14 @@ async def _execute_single_skill(
     state.add_skill_result(skill_result)
 
     if result.get("success"):
-        # Store response
-        state.final_response = result.get("response")
+        # Store response — use better formatter for modules if available
+        if structured_output and isinstance(structured_output, dict) and "modules" in structured_output:
+            from src.infrastructure.agent.nodes import _format_modules_response
+            formatted = _format_modules_response(structured_output, state.patient_context)
+            state.final_response = formatted
+        else:
+            response = result.get("response")
+            state.final_response = response if isinstance(response, str) else str(response)
 
         # Create structured output
         state.structured_output = {
@@ -633,6 +647,7 @@ async def _execute_single_skill(
             "skill_source": result.get("skill_source"),
             "execution_time_ms": execution_time,
             "confidence": state.confidence,
+            "is_incomplete": result.get("is_incomplete", False),
         }
 
         logger.info(f"Skill executed successfully: {state.suggested_skill}")
@@ -693,6 +708,7 @@ def create_skills_integrated_graph():
         aggregate_results_node,
         save_memory_node,
     )
+    from src.infrastructure.agent.nodes.check_basic_questionnaire import check_basic_questionnaire_node
 
     logger.info("Creating skills-integrated agent workflow graph")
 
@@ -701,6 +717,7 @@ def create_skills_integrated_graph():
 
     # Add all nodes
     workflow.add_node("load_patient", load_patient_node)
+    workflow.add_node("check_basic_questionnaire", check_basic_questionnaire_node)
     workflow.add_node("retrieve_memory", retrieve_memory_node)
     workflow.add_node("classify_intent", classify_intent_with_llm_node)
     workflow.add_node("execute_skill", execute_claude_skill_node)
@@ -711,8 +728,21 @@ def create_skills_integrated_graph():
     # Define the entry point
     workflow.set_entry_point("load_patient")
 
-    # Add edges
-    workflow.add_edge("load_patient", "retrieve_memory")
+    # Add edges: load_patient → check_basic_questionnaire → (conditional)
+    workflow.add_edge("load_patient", "check_basic_questionnaire")
+
+    # Conditional routing after basic questionnaire check
+    def route_after_questionnaire_check(state: AgentState) -> str:
+        if state.missing_basic_fields and len(state.missing_basic_fields) > 0:
+            return "save_memory"
+        return "retrieve_memory"
+
+    workflow.add_conditional_edges(
+        "check_basic_questionnaire",
+        route_after_questionnaire_check,
+        {"retrieve_memory": "retrieve_memory", "save_memory": "save_memory"},
+    )
+
     workflow.add_edge("retrieve_memory", "classify_intent")
     workflow.add_edge("classify_intent", "execute_skill")
     workflow.add_edge("execute_skill", "aggregate")
@@ -753,29 +783,16 @@ class SkillsIntegratedAgent:
     3. Rule engine integration (for enhanced accuracy)
     """
 
-    def __init__(self, use_legacy_graph: bool = False):
-        """
-        Initialize the skills-integrated agent.
-
-        Args:
-            use_legacy_graph: If True, use original graph instead of skills-integrated
-        """
+    def __init__(self):
+        """Initialize the skills-integrated agent."""
         self._graph = None
-        self._use_legacy_graph = use_legacy_graph
-        logger.info(
-            f"SkillsIntegratedAgent initialized "
-            f"(use_legacy={use_legacy_graph})"
-        )
+        logger.info("SkillsIntegratedAgent initialized")
 
     @property
     def graph(self):
         """Get or create the workflow graph."""
         if self._graph is None:
-            if self._use_legacy_graph:
-                from src.infrastructure.agent.graph import create_medical_agent_graph
-                self._graph = create_medical_agent_graph()
-            else:
-                self._graph = create_skills_integrated_graph()
+            self._graph = create_skills_integrated_graph()
         return self._graph
 
     async def process(
@@ -785,6 +802,9 @@ class SkillsIntegratedAgent:
         party_id: str = None,
         ping_an_health_data: dict = None,
         previous_patient_context: dict = None,
+        session_id: str = None,
+        suggested_skill: str = None,
+        require_basic_questionnaire: bool = False,
     ) -> AgentState:
         """
         Process a user request through the skills-integrated agent.
@@ -795,6 +815,9 @@ class SkillsIntegratedAgent:
             party_id: Optional customer ID from Ping An health archive
             ping_an_health_data: Optional raw health data from Ping An API
             previous_patient_context: Optional previous patient context from session
+            session_id: Optional session ID for memory isolation
+            suggested_skill: Optional skill name to skip intent classification
+            require_basic_questionnaire: If True, check for missing basic fields before skills
 
         Returns:
             Final agent state with results
@@ -802,7 +825,7 @@ class SkillsIntegratedAgent:
         from src.infrastructure.agent.state import create_initial_state
 
         # Create initial state
-        initial_state = create_initial_state(user_input, patient_id)
+        initial_state = create_initial_state(user_input, patient_id, session_id=session_id)
 
         # Add optional parameters
         if party_id:
@@ -811,6 +834,11 @@ class SkillsIntegratedAgent:
             initial_state.ping_an_health_data = ping_an_health_data
         if previous_patient_context:
             initial_state.previous_patient_context = previous_patient_context
+        if suggested_skill:
+            initial_state.suggested_skill = suggested_skill
+            initial_state.confidence = 1.0
+        if require_basic_questionnaire:
+            initial_state.require_basic_questionnaire = True
 
         logger.info(
             f"Processing request: patient_id={patient_id}, "
@@ -823,10 +851,6 @@ class SkillsIntegratedAgent:
 
             # Convert dict back to AgentState
             if isinstance(result_dict, dict):
-                from src.infrastructure.agent.state import (
-                    AgentState, AgentStatus, IntentType,
-                    PatientContext, ConversationMemory, SkillExecutionResult
-                )
 
                 # Handle status enum
                 if "status" in result_dict and isinstance(result_dict["status"], str):

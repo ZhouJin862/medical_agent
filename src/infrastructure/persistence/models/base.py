@@ -5,11 +5,9 @@ Provides common fields and methods for all models.
 """
 from datetime import datetime
 from typing import Any
-from uuid import uuid4
 from enum import Enum
 
-from sqlalchemy import DateTime, func
-from sqlalchemy.dialects.mysql import CHAR
+from sqlalchemy import BigInteger, DateTime, func, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
 
 
@@ -35,7 +33,7 @@ class Base(DeclarativeBase):
         class_name = self.__class__.__name__
         attrs = []
         for key in self.__mapper__.columns.keys():
-            if key not in ["created_at", "updated_at"]:
+            if key not in ["created_date", "updated_date"]:
                 value = getattr(self, key, None)
                 if value is not None:
                     attrs.append(f"{key}={value!r}")
@@ -47,18 +45,25 @@ class BaseModel(Base):
 
     __abstract__ = True
 
-    id: Mapped[str] = mapped_column(
-        CHAR(36),
+    id: Mapped[int] = mapped_column(
+        BigInteger,
         primary_key=True,
-        default=lambda: uuid4().hex,
-        index=True,
+        autoincrement=True,
     )
-    created_at: Mapped[datetime] = mapped_column(
+    created_by: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+    updated_by: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+    created_date: Mapped[datetime] = mapped_column(
         DateTime,
         server_default=func.current_timestamp(),
         nullable=False,
     )
-    updated_at: Mapped[datetime] = mapped_column(
+    updated_date: Mapped[datetime] = mapped_column(
         DateTime,
         server_default=func.current_timestamp(),
         onupdate=func.current_timestamp(),
@@ -82,5 +87,5 @@ class BaseModel(Base):
     def update(self, **kwargs: Any) -> None:
         """Update model attributes."""
         for key, value in kwargs.items():
-            if hasattr(self, key) and key not in ["id", "created_at"]:
+            if hasattr(self, key) and key not in ["id", "created_date"]:
                 setattr(self, key, value)

@@ -86,11 +86,11 @@ async def list_rule_enhanced_skills(
     return [
         {
             "id": skill.id,
-            "name": skill.name,
+            "name": skill.skill_name,
             "display_name": skill.display_name,
-            "description": skill.description,
+            "description": skill.skill_desc,
             "skill_type": skill.skill_type,
-            "rule_enhancement": dict(skill.config).get("rule_enhancement", {}) if skill.config else {},
+            "rule_enhancement": dict(skill.skill_config).get("rule_enhancement", {}) if skill.skill_config else {},
         }
         for skill in skills
     ]
@@ -120,22 +120,22 @@ async def update_skill_rule_config(
     skill = await repo.update_skill_rule_config(skill_id, config)
 
     # Debug logging
-    logger.info(f"Updated skill {skill_id}, config type: {type(skill.config)}, config: {skill.config}")
+    logger.info(f"Updated skill {skill_id}, config type: {type(skill.skill_config)}, config: {skill.skill_config}")
 
     # Get the rule_enhancement config safely
     rule_enhancement = {}
-    if skill.config:
-        if isinstance(skill.config, dict):
-            rule_enhancement = skill.config.get("rule_enhancement", {})
+    if skill.skill_config:
+        if isinstance(skill.skill_config, dict):
+            rule_enhancement = skill.skill_config.get("rule_enhancement", {})
         else:
             # If it's a JSON object from the database, convert to dict
-            rule_enhancement = dict(skill.config).get("rule_enhancement", {})
+            rule_enhancement = dict(skill.skill_config).get("rule_enhancement", {})
 
     logger.info(f"Returning rule_enhancement: {rule_enhancement}")
 
     return {
         "id": skill.id,
-        "name": skill.name,
+        "name": skill.skill_name,
         "display_name": skill.display_name,
         "rule_enhancement": rule_enhancement,
     }
@@ -160,7 +160,7 @@ async def evaluate_skill_with_rules(
     from src.infrastructure.persistence.models.skill_models import SkillModel
 
     # Load the skill
-    stmt = select(SkillModel).where(SkillModel.id == skill_id)
+    stmt = select(SkillModel).where(SkillModel.id == int(skill_id))
     result = await db.execute(stmt)
     skill = result.scalar_one_or_none()
 

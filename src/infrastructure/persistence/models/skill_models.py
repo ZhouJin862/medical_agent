@@ -9,14 +9,14 @@ from typing import Any
 
 from sqlalchemy import (
     Enum as SQLEnum,
-    ForeignKey,
+    BigInteger,
     Numeric,
     String,
     Text,
     Integer,
     Index,
 )
-from sqlalchemy.dialects.mysql import CHAR, JSON
+from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.persistence.models.base import BaseModel
@@ -61,7 +61,7 @@ class SkillModel(BaseModel):
 
     __tablename__ = "skills"
 
-    name: Mapped[str] = mapped_column(
+    skill_name: Mapped[str] = mapped_column(
         String(100),
         unique=True,
         nullable=False,
@@ -71,11 +71,11 @@ class SkillModel(BaseModel):
         String(255),
         nullable=False,
     )
-    description: Mapped[str | None] = mapped_column(
+    skill_desc: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
     )
-    type: Mapped[SkillType] = mapped_column(
+    skill_type: Mapped[SkillType] = mapped_column(
         SQLEnum(SkillType),
         nullable=False,
         index=True,
@@ -84,12 +84,12 @@ class SkillModel(BaseModel):
         SQLEnum(SkillCategory),
         nullable=True,
     )
-    enabled: Mapped[bool] = mapped_column(
+    is_enabled: Mapped[bool] = mapped_column(
         default=True,
         nullable=False,
         index=True,
     )
-    version: Mapped[str] = mapped_column(
+    skill_version: Mapped[str] = mapped_column(
         String(20),
         default="1.0.0",
         nullable=False,
@@ -98,13 +98,13 @@ class SkillModel(BaseModel):
         JSON,
         nullable=True,
     )
-    config: Mapped[dict[str, Any] | None] = mapped_column(
+    skill_config: Mapped[dict[str, Any] | None] = mapped_column(
         JSON,
         nullable=True,
     )
 
     __table_args__ = (
-        Index("idx_skill_type_enabled", "type", "enabled"),
+        Index("idx_skill_type_enabled", "skill_type", "is_enabled"),
     )
 
 
@@ -117,9 +117,8 @@ class SkillPromptModel(BaseModel):
 
     __tablename__ = "skill_prompts"
 
-    skill_id: Mapped[str] = mapped_column(
-        CHAR(36),
-        ForeignKey("skills.id", ondelete="CASCADE"),
+    skill_id: Mapped[int] = mapped_column(
+        BigInteger,
         nullable=False,
         index=True,
     )
@@ -127,16 +126,16 @@ class SkillPromptModel(BaseModel):
         String(50),
         nullable=False,
     )
-    content: Mapped[str] = mapped_column(
+    prompt_content: Mapped[str] = mapped_column(
         Text,
         nullable=False,
     )
-    version: Mapped[str] = mapped_column(
+    prompt_version: Mapped[str] = mapped_column(
         String(20),
         default="1.0.0",
         nullable=False,
     )
-    variables: Mapped[list[str] | None] = mapped_column(
+    prompt_variables: Mapped[list[str] | None] = mapped_column(
         JSON,
         nullable=True,
     )
@@ -155,9 +154,8 @@ class SkillModelConfigModel(BaseModel):
 
     __tablename__ = "skill_model_configs"
 
-    skill_id: Mapped[str] = mapped_column(
-        CHAR(36),
-        ForeignKey("skills.id", ondelete="CASCADE"),
+    skill_id: Mapped[int] = mapped_column(
+        BigInteger,
         nullable=False,
         unique=True,
         index=True,
@@ -183,7 +181,7 @@ class SkillModelConfigModel(BaseModel):
         Numeric(3, 2),
         nullable=True,
     )
-    config: Mapped[dict[str, Any] | None] = mapped_column(
+    model_config: Mapped[dict[str, Any] | None] = mapped_column(
         JSON,
         nullable=True,
     )
@@ -211,7 +209,7 @@ class DiseaseTypeModel(BaseModel):
         nullable=False,
         index=True,
     )
-    name: Mapped[str] = mapped_column(
+    disease_name: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
     )
@@ -219,7 +217,7 @@ class DiseaseTypeModel(BaseModel):
         String(100),
         nullable=False,
     )
-    category: Mapped[DiseaseCategory] = mapped_column(
+    disease_category: Mapped[DiseaseCategory] = mapped_column(
         SQLEnum(DiseaseCategory),
         nullable=False,
     )
@@ -227,7 +225,7 @@ class DiseaseTypeModel(BaseModel):
         String(20),
         nullable=True,
     )
-    description: Mapped[str | None] = mapped_column(
+    disease_desc: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
     )
@@ -264,7 +262,6 @@ class KnowledgeBaseModel(BaseModel):
     )
     disease_code: Mapped[str | None] = mapped_column(
         String(50),
-        ForeignKey("disease_types.code"),
         nullable=True,
         index=True,
     )
@@ -276,15 +273,15 @@ class KnowledgeBaseModel(BaseModel):
         String(255),
         nullable=False,
     )
-    content: Mapped[str] = mapped_column(
+    kb_content: Mapped[str] = mapped_column(
         Text,
         nullable=False,
     )
-    source: Mapped[str] = mapped_column(
+    kb_source: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
     )
-    version: Mapped[str] = mapped_column(
+    kb_version: Mapped[str] = mapped_column(
         String(20),
         default="1.0.0",
         nullable=False,
@@ -334,7 +331,6 @@ class VitalSignsStandardModel(BaseModel):
     )
     disease_code: Mapped[str | None] = mapped_column(
         String(50),
-        ForeignKey("disease_types.code"),
         nullable=True,
         index=True,
     )
@@ -399,7 +395,7 @@ class VitalSignsStandardModel(BaseModel):
         nullable=True,
     )
 
-    description: Mapped[str | None] = mapped_column(
+    standard_desc: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
     )

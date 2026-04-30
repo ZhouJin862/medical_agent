@@ -92,17 +92,17 @@ class SkillRegistry:
             # Query skills from database
             from src.infrastructure.persistence.models.skill_models import Skill
 
-            skills = db_session.query(Skill).filter(Skill.is_active == True).all()
+            skills = db_session.query(Skill).filter(Skill.is_enabled == True).all()
 
             for skill in skills:
                 definition = SkillDefinition(
                     id=str(skill.id),
-                    name=skill.name,
-                    description=skill.description or "",
-                    signature_name=skill.signature_name or "default",
+                    name=skill.skill_name,
+                    description=skill.skill_desc or "",
+                    signature_name=skill.skill_type or "default",
                     model_provider=skill.model_provider or "anthropic",
-                    model_config=skill.model_config or {},
-                    enabled=skill.is_active,
+                    model_config=skill.skill_config or {},
+                    enabled=skill.is_enabled,
                     intent_keywords=skill.intent_keywords or [],
                     knowledge_base_ids=[
                         str(kb.id) for kb in skill.knowledge_bases

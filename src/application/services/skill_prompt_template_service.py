@@ -101,9 +101,9 @@ class SkillPromptTemplateService:
             template = PromptTemplate(
                 skill_id=model.skill_id,
                 prompt_type=model.prompt_type,
-                content=model.content,
-                version=model.version,
-                variables=model.variables or [],
+                content=model.prompt_content,
+                version=model.prompt_version,
+                variables=model.prompt_variables or [],
             )
             templates[model.prompt_type] = template
 
@@ -215,9 +215,9 @@ class SkillPromptTemplateService:
         model = SkillPromptModel(
             skill_id=skill_id,
             prompt_type=prompt_type,
-            content=content,
-            version=version,
-            variables=variables,
+            prompt_content=content,
+            prompt_version=version,
+            prompt_variables=variables,
         )
         session.add(model)
         await session.commit()
@@ -228,9 +228,9 @@ class SkillPromptTemplateService:
         return PromptTemplate(
             skill_id=model.skill_id,
             prompt_type=model.prompt_type,
-            content=model.content,
-            version=model.version,
-            variables=model.variables,
+            content=model.prompt_content,
+            version=model.prompt_version,
+            variables=model.prompt_variables,
         )
 
     @classmethod
@@ -274,15 +274,15 @@ class SkillPromptTemplateService:
 
             # Auto-increment version if not provided
             if version is None:
-                major, minor = map(int, model.version.split("."))
+                major, minor = map(int, model.prompt_version.split("."))
                 version = f"{major}.{minor + 1}.0"
 
-            model.content = content
-            model.version = version
+            model.prompt_content = content
+            model.prompt_version = version
             if variables is not None:
-                model.variables = variables
+                model.prompt_variables = variables
             else:
-                model.variables = cls._extract_variables(content)
+                model.prompt_variables = cls._extract_variables(content)
 
             await sess.commit()
 
@@ -292,9 +292,9 @@ class SkillPromptTemplateService:
         return PromptTemplate(
             skill_id=model.skill_id,
             prompt_type=model.prompt_type,
-            content=model.content,
-            version=model.version,
-            variables=model.variables,
+            content=model.prompt_content,
+            version=model.prompt_version,
+            variables=model.prompt_variables,
         )
 
     @classmethod
@@ -448,7 +448,7 @@ class SkillPromptTemplateService:
         """
         async with get_db_session_context() as sess:
             result = await sess.execute(
-                select(SkillPromptModel, SkillModel.name)
+                select(SkillPromptModel, SkillModel.skill_name)
                 .join(SkillModel, SkillPromptModel.skill_id == SkillModel.id)
             )
             rows = result.all()
@@ -456,11 +456,11 @@ class SkillPromptTemplateService:
         return [
             {
                 "skill_id": row.SkillPromptModel.skill_id,
-                "skill_name": row.name,
+                "skill_name": row.skill_name,
                 "prompt_type": row.SkillPromptModel.prompt_type,
-                "version": row.SkillPromptModel.version,
-                "variables": row.SkillPromptModel.variables or [],
-                "content_preview": row.SkillPromptModel.content[:100] + "...",
+                "version": row.SkillPromptModel.prompt_version,
+                "variables": row.SkillPromptModel.prompt_variables or [],
+                "content_preview": row.SkillPromptModel.prompt_content[:100] + "...",
             }
             for row in rows
         ]

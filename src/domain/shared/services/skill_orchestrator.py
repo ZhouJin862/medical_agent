@@ -363,22 +363,38 @@ class SkillExecutor:
             )
 
         try:
-            # Check if this is a workflow skill
+            # Priority 1: frontmatter tools (has `tools` in SKILL.md YAML)
+            if self._has_tools_frontmatter(skill_name):
+                return await self._execute_tools_skill(
+                    skill_name,
+                    user_input,
+                    patient_context,
+                )
+
+            # Priority 2: workflow skill (has ### 步骤 in SKILL.md)
             if self._is_workflow_skill(skill_name):
-                # Execute via skill_md_executor
                 return await self._execute_workflow_skill(
                     skill_name,
                     user_input,
                     patient_context,
                 )
-            else:
-                # Execute as prompt skill
-                return await self._execute_prompt_skill(
-                    skill_def,
-                    user_input,
-                    patient_context,
-                    conversation_context,
-                )
+
+            # Priority 3: file-based skill (has scripts/main.py)
+            script_result = await self._execute_script_skill(
+                skill_name,
+                user_input,
+                patient_context,
+            )
+            if script_result is not None:
+                return script_result
+
+            # Priority 4: fallback to LLM prompt skill
+            return await self._execute_prompt_skill(
+                skill_def,
+                user_input,
+                patient_context,
+                conversation_context,
+            )
 
         except Exception as e:
             logger.error(f"Skill {skill_name} execution failed: {e}")
@@ -388,6 +404,145 @@ class SkillExecutor:
                 error=str(e),
                 execution_time_ms=int((time.time() - start_time) * 1000),
             )
+
+    async def _execute_script_skill(
+        self,
+        skill_name: str,
+        user_input: str,
+        patient_context: Optional[Dict[str, Any]],
+    ) -> Optional[SkillExecutionResult]:
+        """
+        Execute a file-based skill via subprocess (scripts/main.py).
+
+        Returns None if no script found, so caller can fall through to prompt.
+        """
+        from pathlib import Path
+
+        skill_dir = Path("skills") / skill_name
+        if not skill_dir.exists():
+            return None
+
+        # Check for scripts/main.py
+        main_script = skill_dir / "scripts" / "main.py"
+        if not main_script.exists():
+            return None
+
+        start_time = time.time()
+
+        try:
+            from src.infrastructure.agent.ms_agent_executor import execute_skill_via_backend
+
+            # Build a minimal PatientContext-like object for the executor
+            from src.infrastructure.agent.state import PatientContext
+            pc = None
+            if patient_context:
+                pc = PatientContext(
+                    patient_id=patient_context.get("basic_info", {}).get("patient_id", ""),
+                    basic_info=patient_context.get("basic_info", {}),
+                    vital_signs=patient_context.get("vital_signs", {}),
+                    medical_history=patient_context.get("medical_history", {}),
+                )
+
+            result = await execute_skill_via_backend(
+                skill_name=skill_name,
+                user_input=user_input,
+                patient_context=pc,
+                timeout=30,
+            )
+
+            if result is None:
+                logger.warning(f"Subprocess execution returned None for {skill_name}")
+                return None
+
+            # Extract structured output from result_data
+            result_data = result.result_data or {}
+            final_out = result_data.get("final_output", result_data)
+            if isinstance(final_out, dict) and "final_output" in final_out and isinstance(final_out["final_output"], dict):
+                nested = final_out["final_output"]
+                if "modules" in nested:
+                    final_out = nested
+
+            response = None
+            if isinstance(final_out, dict):
+                response = final_out.get("message") or final_out.get("response")
+
+            return SkillExecutionResult(
+                skill_name=skill_name,
+                success=result.success,
+                response=response,
+                structured_output=final_out if "modules" in (final_out or {}) else result_data,
+                error=result.error if hasattr(result, 'error') else None,
+                execution_time_ms=result.execution_time,
+                metadata={"backend": "subprocess"},
+            )
+
+        except Exception as e:
+            logger.warning(f"Subprocess execution failed for {skill_name}: {e}")
+            return None
+
+    def _has_tools_frontmatter(self, skill_name: str) -> bool:
+        """Check if skill SKILL.md has a `tools` field in frontmatter."""
+        try:
+            from pathlib import Path
+            import yaml
+
+            possible_paths = [
+                Path("skills") / skill_name,
+                Path.cwd() / "skills" / skill_name,
+            ]
+
+            for path in possible_paths:
+                skill_md = path / "SKILL.md"
+                if skill_md.exists():
+                    content = skill_md.read_text(encoding="utf-8")
+                    if not content.startswith("---"):
+                        continue
+                    end = content.find("---", 3)
+                    if end == -1:
+                        continue
+                    try:
+                        fm = yaml.safe_load(content[3:end].strip())
+                        return isinstance(fm, dict) and "tools" in fm
+                    except Exception:
+                        continue
+            return False
+        except Exception:
+            return False
+
+    async def _execute_tools_skill(
+        self,
+        skill_name: str,
+        user_input: str,
+        patient_context: Optional[Dict[str, Any]],
+    ) -> SkillExecutionResult:
+        """Execute skill via frontmatter `tools` declaration."""
+        from src.infrastructure.agent.skill_tools_executor import execute_skill_via_tools
+
+        input_data = self._build_skill_input_data(user_input, patient_context)
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: execute_skill_via_tools(skill_name, input_data),
+        )
+
+        # Extract response / structured output (same logic as workflow skill)
+        response = result.get("response")
+        final_out = result.get("final_output")
+        if not final_out and "modules" in result:
+            final_out = result
+
+        if not response and final_out and isinstance(final_out, dict):
+            response = final_out.get("message") or final_out.get("response")
+
+        return SkillExecutionResult(
+            skill_name=skill_name,
+            success=result.get("success", False),
+            response=response,
+            structured_output=final_out,
+            error=result.get("error"),
+            metadata=result.get("metadata", {}),
+        )
 
     def _is_workflow_skill(self, skill_name: str) -> bool:
         """Check if skill is workflow type."""
@@ -444,7 +599,7 @@ class SkillExecutor:
         # Get structured output from various locations
         final_out = result.get("final_output")
         if not final_out and "modules" in result:
-            # Skills like chronic-disease-risk-assessment put modules at top level
+            # Some skills put modules at top level
             final_out = result
 
         # If no response, try to extract text from final_output
@@ -512,7 +667,7 @@ class SkillExecutor:
 
         Provides multiple data formats to support different skill types:
         - patient_data/basic_info format for cvd-risk-assessment
-        - patient_info/health_metrics format for chronic-disease-risk-assessment
+        - patient_info/health_metrics format for similar skills
         """
         patient_context = patient_context or {}
 
@@ -525,7 +680,7 @@ class SkillExecutor:
             "basic_info": basic_info,
         }
 
-        # Format 2: patient_info/health_metrics format (for chronic-disease-risk-assessment)
+        # Format 2: patient_info/health_metrics format
         # Build patient_info from basic_info
         patient_info = {
             "name": basic_info.get("patient_id", "患者"),  # Use patient_id as name fallback
@@ -597,7 +752,7 @@ class SkillExecutor:
             "vital_signs": vital_signs,
             "patient_data": patient_data,
             "medical_history": medical_history,
-            # Format for chronic-disease-risk-assessment and similar skills
+            # Format for skills that use patient_info/health_metrics
             "patient_info": patient_info,
             "health_metrics": health_metrics,
         }
@@ -654,12 +809,17 @@ class ResultAggregator:
 
         combined_reports = "\n\n---\n\n".join(skill_reports)
 
-        prompt = f"""你是一位专业的健康评估报告整合专家。以下用户提出了健康评估请求，多个专业评估技能分别返回了各自的报告。
+        # Load prompt from DB with fallback
+        from src.domain.shared.services.system_prompt_service import get_system_prompt_service
+        prompt_service = get_system_prompt_service()
+        prompt_template = await prompt_service.get_prompt_with_fallback(
+            "aggregator_integrate",
+            fallback="""你是一位专业的健康评估报告整合专家。以下用户提出了健康评估请求，多个专业评估技能分别返回了各自的报告。
 
-**用户请求**: {user_input}
+**用户请求**: {{user_input}}
 
 **各技能报告**:
-{combined_reports}
+{{combined_reports}}
 
 请将以上多个技能的报告整合为一份统一、连贯的健康评估报告。要求：
 
@@ -669,7 +829,15 @@ class ResultAggregator:
 4. **专业语气**: 使用专业但易于理解的中文医学语言
 5. **Markdown格式**: 使用 Markdown 格式，包含标题层级、列表、加粗等
 
-直接输出整合后的报告，不要包含任何解释性前言。"""
+直接输出整合后的报告，不要包含任何解释性前言。""",
+        )
+        try:
+            prompt = prompt_template.format(
+                user_input=user_input,
+                combined_reports=combined_reports,
+            )
+        except (KeyError, IndexError):
+            prompt = prompt_template
 
         try:
             settings = get_settings()
@@ -702,7 +870,7 @@ class ResultAggregator:
         # Try to extract from structured_output
         if result.structured_output:
             if isinstance(result.structured_output, dict):
-                # Check for message field (from chronic-disease-risk-assessment)
+                # Check for message field
                 if "message" in result.structured_output:
                     return result.structured_output["message"]
                 # Check for data.message
@@ -786,7 +954,7 @@ class ResultAggregator:
 
         if not successful_with_response and not successful_with_structured:
             # When all skills fail or have no output, try to generate an LLM-based response
-            return self._generate_fallback_response(user_input, failed)
+            return await self._generate_fallback_response(user_input, failed)
 
         # Single skill success: return directly without aggregation
         if successful_with_response and len(successful_with_response) == 1:
@@ -819,11 +987,11 @@ class ResultAggregator:
 
         # If we only have structured outputs, generate LLM-based summary
         if successful_with_structured:
-            return self._generate_structured_summary(successful_with_structured, failed, user_input)
+            return await self._generate_structured_summary(successful_with_structured, failed, user_input)
 
-        return self._generate_fallback_response(user_input, failed)
+        return await self._generate_fallback_response(user_input, failed)
 
-    def _generate_structured_summary(
+    async def _generate_structured_summary(
         self,
         structured_results: List[SkillExecutionResult],
         failed_results: List[SkillExecutionResult],
@@ -868,13 +1036,18 @@ class ResultAggregator:
                     for r in failed_results
                 ]
 
-            prompt = f"""The user requested a health assessment: "{user_input}"
+            # Load prompt from DB with fallback
+            from src.domain.shared.services.system_prompt_service import get_system_prompt_service
+            prompt_service = get_system_prompt_service()
+            prompt_template = await prompt_service.get_prompt_with_fallback(
+                "aggregator_structured_summary",
+                fallback="""The user requested a health assessment: "{{user_input}}"
 
 I successfully executed some assessment skills and got structured results:
 
-{chr(10).join(structured_summary)}
+{{structured_summary}}
 
-{'Some skills failed:' + chr(10) + chr(10).join(error_summary) if failed_results else ''}
+{{error_summary_section}}
 
 Please provide a helpful response to the user that:
 1. Summarizes the key findings from the successful assessments (use the information provided above)
@@ -883,7 +1056,17 @@ Please provide a helpful response to the user that:
 4. Offers to help with additional information
 
 Respond in a helpful, professional tone in Chinese (since the user input is in Chinese).
-Keep the response concise and actionable."""
+Keep the response concise and actionable.""",
+            )
+            error_summary_section = f"Some skills failed:\n{chr(10).join(error_summary)}" if failed_results else ""
+            try:
+                prompt = prompt_template.format(
+                    user_input=user_input,
+                    structured_summary=chr(10).join(structured_summary),
+                    error_summary_section=error_summary_section,
+                )
+            except (KeyError, IndexError):
+                prompt = prompt_template
 
             response = client.messages.create(
                 model=settings.model,
@@ -918,7 +1101,7 @@ Keep the response concise and actionable."""
                     return msg
             return "需要补充健康数据才能进行评估。请提供年龄、血压、血脂等关键指标以完成评估。"
 
-    def _generate_fallback_response(self, user_input: str, failed_results: List[SkillExecutionResult]) -> str:
+    async def _generate_fallback_response(self, user_input: str, failed_results: List[SkillExecutionResult]) -> str:
         """Generate an LLM-based fallback response when all skills fail."""
         import anthropic
         from src.config.settings import get_settings
@@ -937,11 +1120,16 @@ Keep the response concise and actionable."""
                 for r in failed_results
             ])
 
-            prompt = f"""The user requested a health assessment: "{user_input}"
+            # Load prompt from DB with fallback
+            from src.domain.shared.services.system_prompt_service import get_system_prompt_service
+            prompt_service = get_system_prompt_service()
+            prompt_template = await prompt_service.get_prompt_with_fallback(
+                "aggregator_fallback",
+                fallback="""The user requested a health assessment: "{{user_input}}"
 
 I attempted to run multiple assessment skills but they all failed. Here are the errors:
 
-{error_summary}
+{{error_summary}}
 
 Please provide a helpful response to the user that:
 1. Acknowledges that the automated assessment encountered technical issues
@@ -949,7 +1137,15 @@ Please provide a helpful response to the user that:
 3. Suggests what data might be needed for a proper assessment
 4. Offers to help once the technical issues are resolved
 
-Respond in a helpful, professional tone in Chinese (since the user input is in Chinese)."""
+Respond in a helpful, professional tone in Chinese (since the user input is in Chinese).""",
+            )
+            try:
+                prompt = prompt_template.format(
+                    user_input=user_input,
+                    error_summary=error_summary,
+                )
+            except (KeyError, IndexError):
+                prompt = prompt_template
 
             response = client.messages.create(
                 model=settings.model,

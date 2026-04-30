@@ -2,6 +2,9 @@
 name: cvd-risk-assessment
 description: 心血管病风险评估、心血管风险评估、CVD风险、心血管病一级预防、心脏病风险评估、中风风险评估。适用于中国成人心血管病一级预防风险评估 - 评估心血管风险等级，识别危险因素。触发词：心血管、心脏病、中风、风险评估、危险分层、健康评估
 tags: [心血管, 心脏病, 中风, 风险评估, 危险分层, CVD, cardiovascular, heart disease, stroke]
+tools:
+  - script: scripts/risk_assessment.py
+    args: ["--input", "$input", "--mode", "skill"]
 ---
 
 # 中国成人心血管病风险评估

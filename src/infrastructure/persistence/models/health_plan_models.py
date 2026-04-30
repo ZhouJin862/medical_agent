@@ -8,8 +8,8 @@ import json
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import Enum as SQLEnum, ForeignKey, String, Text, Index
-from sqlalchemy.dialects.mysql import CHAR, JSON
+from sqlalchemy import BigInteger, Enum as SQLEnum, String, Text, Index
+from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.infrastructure.persistence.models.base import BaseModel
@@ -42,13 +42,13 @@ class HealthPlanModel(BaseModel):
     __tablename__ = "health_plans"
 
     plan_id: Mapped[str] = mapped_column(
-        CHAR(36),
+        String(36),
         unique=True,
         nullable=False,
         index=True,
     )
     patient_id: Mapped[str] = mapped_column(
-        CHAR(36),
+        String(36),
         nullable=False,
         index=True,
     )
@@ -66,7 +66,7 @@ class HealthPlanModel(BaseModel):
         String(255),
         nullable=True,
     )
-    description: Mapped[str | None] = mapped_column(
+    plan_desc: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
     )
@@ -85,7 +85,9 @@ class HealthPlanModel(BaseModel):
         back_populates="health_plan",
         cascade="all, delete-orphan",
         lazy="selectin",
-        order_by="PrescriptionModel.created_at",
+        order_by="PrescriptionModel.created_date",
+        primaryjoin="HealthPlanModel.id == PrescriptionModel.health_plan_id",
+        foreign_keys="PrescriptionModel.health_plan_id",
     )
 
     __table_args__ = (
@@ -104,9 +106,8 @@ class PrescriptionModel(BaseModel):
 
     __tablename__ = "prescriptions"
 
-    health_plan_id: Mapped[str] = mapped_column(
-        CHAR(36),
-        ForeignKey("health_plans.id", ondelete="CASCADE"),
+    health_plan_id: Mapped[int] = mapped_column(
+        BigInteger,
         nullable=False,
         index=True,
     )
@@ -118,11 +119,11 @@ class PrescriptionModel(BaseModel):
         String(255),
         nullable=False,
     )
-    content: Mapped[dict[str, Any]] = mapped_column(
+    prescription_content: Mapped[dict[str, Any]] = mapped_column(
         JSON,
         nullable=False,
     )
-    priority: Mapped[str | None] = mapped_column(
+    prescription_priority: Mapped[str | None] = mapped_column(
         String(20),
         nullable=True,
     )
@@ -139,6 +140,8 @@ class PrescriptionModel(BaseModel):
     health_plan: Mapped["HealthPlanModel"] = relationship(
         "HealthPlanModel",
         back_populates="prescriptions",
+        primaryjoin="PrescriptionModel.health_plan_id == HealthPlanModel.id",
+        foreign_keys=[health_plan_id],
     )
 
     __table_args__ = (
@@ -147,13 +150,13 @@ class PrescriptionModel(BaseModel):
 
     def set_content(self, data: dict[str, Any]) -> None:
         """Set prescription content."""
-        self.content = data
+        self.prescription_content = data
 
     def get_content(self) -> dict[str, Any]:
         """Get prescription content."""
-        if isinstance(self.content, str):
+        if isinstance(self.prescription_content, str):
             try:
-                return json.loads(self.content)
+                return json.loads(self.prescription_content)
             except (json.JSONDecodeError, TypeError):
                 return {}
-        return self.content or {}
+        return self.prescription_content or {}

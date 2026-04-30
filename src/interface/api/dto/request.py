@@ -227,9 +227,96 @@ class StreamingChatRequest(BaseModel):
     session_id: str | None = Field(None, description="Session ID (creates new session if not provided)")
     patient_id: str = Field(..., description="Patient identifier")
     message: str = Field(..., min_length=1, description="User message content")
+    questionnaire_answers: dict[str, Any] | None = Field(None, description="Questionnaire answers {question_id: value} submitted from frontend")
 
     model_config = {"json_schema_extra": {"example": {
         "session_id": None,
         "patient_id": "patient_001",
-        "message": "我今天血压有点高，150/95，需要担心吗？",
+        "message": "继续评估",
+        "questionnaire_answers": {"gender-select": "male", "q_age_picker": 45, "height-input": 170, "weight-input": 75},
     }}}
+
+
+# Allowed skill names for the standard assessment API
+ASSESSMENT_SKILLS = [
+    "cvd-risk-assessment",
+    "hypertension-risk-assessment",
+    "hyperglycemia-risk-assessment",
+    "hyperlipidemia-risk-assessment",
+    "hyperuricemia-risk-assessment",
+    "obesity-risk-assessment",
+    "population-classification",
+]
+
+# Package shorthands that expand to multiple skills
+SKILL_PACKAGES = {
+    "package@assessment": ASSESSMENT_SKILLS,
+}
+
+
+def _normalize_skills(v: str | list[str]) -> list[str]:
+    """Normalize skill input to a flat list of individual skill names.
+
+    Accepts:
+      - Single string:  "cvd-risk-assessment"
+      - List of strings: ["cvd-risk-assessment", "hypertension-risk-assessment"]
+      - Package shorthand: "package@assessment" → all ASSESSMENT_SKILLS
+      - Mixed: ["package@assessment", "cvd-risk-assessment"]
+    """
+    if isinstance(v, str):
+        v = [v]
+    expanded: list[str] = []
+    for item in v:
+        pkg = SKILL_PACKAGES.get(item)
+        if pkg:
+            expanded.extend(pkg)
+        else:
+            expanded.append(item)
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    result: list[str] = []
+    for s in expanded:
+        if s not in seen:
+            seen.add(s)
+            result.append(s)
+    return result
+
+
+class AssessmentRequest(BaseModel):
+    """Request model for standard assessment API (third-party integration)."""
+
+    party_id: str = Field(..., description="Patient / customer identifier")
+    skill: str | list[str] = Field(..., description="Skill(s) to execute. Accepts a single skill name, an array, or a package shorthand like 'package@assessment'.")
+    patient_data: dict[str, Any] | None = Field(None, description="Patient basic info (age, gender). Auto-fetched from Ping An API if omitted.")
+    vital_signs: dict[str, Any] | None = Field(None, description="Vital signs data. Auto-fetched from Ping An API if omitted.")
+    medical_history: dict[str, Any] | None = Field(None, description="Medical history. Auto-fetched from Ping An API if omitted.")
+    questionnaire_answers: dict[str, Any] | None = Field(None, description="Questionnaire answers {question_id: value} submitted from frontend")
+    session_id: str | None = Field(None, description="会话ID（首次不传，后续传返回值中的 session_id）")
+    re_assessment: bool = Field(False, description="是否重新评估。为 true 时清空上次会话数据，返回全量问卷题目")
+
+    @field_validator("skill", mode="before")
+    @classmethod
+    def validate_and_normalize_skill(cls, v: str | list[str]) -> list[str]:
+        skills = _normalize_skills(v)
+        for s in skills:
+            if s not in ASSESSMENT_SKILLS:
+                raise ValueError(f"Unknown skill: {s}. Available: {ASSESSMENT_SKILLS}")
+        return skills
+
+    model_config = {"json_schema_extra": {"examples": [
+        {
+            "party_id": "123",
+            "skill": "cvd-risk-assessment",
+            "patient_data": {"age": 26, "gender": "男"},
+            "vital_signs": {"systolic_bp": 150, "diastolic_bp": 95},
+            "medical_history": {"disease_labels": ["高血压"]},
+        },
+        {
+            "party_id": "123",
+            "skill": ["cvd-risk-assessment", "hypertension-risk-assessment"],
+        },
+        {
+            "party_id": "123",
+            "skill": "package@assessment",
+        },
+    ]}}

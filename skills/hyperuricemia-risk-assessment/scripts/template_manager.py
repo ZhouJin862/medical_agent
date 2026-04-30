@@ -12,9 +12,8 @@
 import json
 import sys
 import argparse
-import os
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from pathlib import Path
 
 try:
@@ -32,11 +31,6 @@ class TemplateManager:
     
     # 内置模板
     BUILTIN_TEMPLATES = {
-        'default': 'default_template.md',
-        'simple': 'simple_template.md',
-        'insurance': 'insurance_template.md',
-        'clinical': 'clinical_template.md',
-        'personal': 'personal_template.md',
         'report': 'report_template.md'
     }
     
@@ -260,6 +254,81 @@ class TemplateManager:
         return templates
 
 
+def _build_structured_result(risk_data, overall_risk, health_metrics, input_data):
+    """Build structured result for unified assessment JSON schema."""
+    risk_grade = overall_risk.get('risk_grade', '') or overall_risk.get('risk_level', '')
+    category = _map_risk_to_category(risk_grade)
+
+    # 1. Population classification
+    population_classification = {
+        "categories": [{"category": category, "label": risk_grade or category}],
+        "primary_category": category,
+        "basis": [],
+        "score": 0,
+    }
+
+    # 2. Recommended data collection (check for missing vitals)
+    recommended = []
+    if not risk_data.get('uric_acid'):
+        recommended.append({"item": "血尿酸", "reason": "缺少血尿酸数据"})
+    kidney = input_data.get('kidney_assessment', {})
+    if not kidney.get('egfr'):
+        recommended.append({"item": "肾功能检查(eGFR)", "reason": "需要评估肾功能状况"})
+    gout = input_data.get('gout_risk', {})
+    if not gout.get('risk_level'):
+        recommended.append({"item": "痛风风险评估", "reason": "需要评估痛风风险"})
+
+    # 3. Abnormal indicators
+    abnormal = []
+    ua_val = risk_data.get('uric_acid')
+    if ua_val:
+        try:
+            uv = float(ua_val)
+            if uv >= 420:
+                abnormal.append({"indicator": "血尿酸", "value": f"{ua_val} μmol/L", "reference": "<420 μmol/L(男)，<360 μmol/L(女)"})
+        except (ValueError, TypeError):
+            pass
+
+    # 4. Disease prediction
+    disease_prediction = []
+    is_elevated = input_data.get('uric_acid_assessment', {}).get('is_elevated', False)
+    if is_elevated:
+        disease_prediction.append({"disease": "痛风", "risk": "高", "description": "高尿酸血症是痛风的重要危险因素"})
+        disease_prediction.append({"disease": "尿酸性肾病", "risk": "中高", "description": "长期高尿酸可导致肾脏损害"})
+    gout_risk_level = risk_data.get('gout_risk_level', '')
+    if gout_risk_level in ('高', '很高'):
+        disease_prediction.append({"disease": "急性痛风发作", "risk": "高", "description": "近期痛风发作风险较高"})
+
+    # 5. Intervention prescriptions
+    prescriptions = []
+    prescriptions.append({"type": "饮食", "content": ["低嘌呤饮食", "避免内脏、海鲜、浓汤", "限制饮酒"], "priority": "高"})
+    prescriptions.append({"type": "运动", "content": ["规律运动，控制体重", "避免剧烈运动"], "priority": "中"})
+    prescriptions.append({"type": "监测", "content": ["每1-3个月复查血尿酸水平"], "priority": "高"})
+    if is_elevated:
+        prescriptions.append({"type": "饮水", "content": ["每日饮水2000ml以上，促进尿酸排泄"], "priority": "高"})
+
+    return {
+        "population_classification": population_classification,
+        "recommended_data_collection": recommended,
+        "abnormal_indicators": abnormal,
+        "disease_prediction": disease_prediction,
+        "intervention_prescriptions": prescriptions,
+    }
+
+
+def _map_risk_to_category(risk_grade):
+    if not risk_grade:
+        return "未知"
+    grade = risk_grade.lower()
+    if "很高危" in grade or "极高" in grade:
+        return "专病"
+    if "高危" in grade or "高" in grade:
+        return "慢病"
+    if "中危" in grade or "中" in grade:
+        return "亚健康"
+    return "健康"
+
+
 def main():
     # 配置 UTF-8 编码输出（Windows 兼容）
     import io
@@ -329,11 +398,15 @@ def main():
 
             if args.format == 'modules':
                 # 分模块输出
+                overall_risk = input_data.get('overall_risk', {})
+                health_metrics = input_data.get('uric_acid_assessment', {})
+                structured_result = _build_structured_result(template_vars, overall_risk, health_metrics, input_data)
                 result = {
                     "success": True,
                     "template": args.template,
                     "modules": sections,
-                    "total_modules": len(sections)
+                    "total_modules": len(sections),
+                    "structured_result": structured_result
                 }
             elif args.format == 'markdown':
                 # 完整 markdown 输出

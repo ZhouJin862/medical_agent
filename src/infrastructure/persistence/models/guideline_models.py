@@ -7,7 +7,6 @@ for disease prevention and treatment.
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import String, Text, JSON, Boolean, Index
-from sqlalchemy.dialects.mysql import CHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.persistence.models.base import BaseModel
@@ -34,14 +33,14 @@ class GuidelineModel(BaseModel):
     __tablename__ = "guidelines"
 
     # Basic information
-    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    guideline_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    guideline_desc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Disease classification
     disease_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     disease_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    category: Mapped[str] = mapped_column(String(50), nullable=False, default=GuidelineCategory.COMPREHENSIVE)
+    guideline_category: Mapped[str] = mapped_column(String(50), nullable=False, default=GuidelineCategory.COMPREHENSIVE)
 
     # Guideline content (JSON configuration)
     guideline_content: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
@@ -89,9 +88,9 @@ class GuidelineModel(BaseModel):
     publication_year: Mapped[Optional[int]] = mapped_column(nullable=True)
 
     # Metadata
-    version: Mapped[str] = mapped_column(String(20), default="1.0.0")
+    guideline_version: Mapped[str] = mapped_column(String(20), default="1.0.0")
     publisher: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Target population
     target_population: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
@@ -107,7 +106,7 @@ class GuidelineModel(BaseModel):
 
     __table_args__ = (
         Index("idx_guideline_disease_code", "disease_code"),
-        Index("idx_guideline_category", "category"),
+        Index("idx_guideline_category", "guideline_category"),
     )
 
     def to_dict(self) -> Dict[str, Any]:

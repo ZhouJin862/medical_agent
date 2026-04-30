@@ -3,6 +3,9 @@ Base MCP Client implementation.
 
 Provides the foundation for all MCP clients with common functionality
 for tool calling and communication with MCP servers.
+
+Note: The 'mcp' package (>=1.0.0, requires Python >=3.10) is optional.
+If not installed, MCP client functionality will be disabled gracefully.
 """
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
@@ -11,10 +14,27 @@ import json
 import logging
 from pathlib import Path
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
 logger = logging.getLogger(__name__)
+
+# Lazy import mcp — it's optional (requires Python >=3.10)
+_mcp_available = False
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    _mcp_available = True
+except ImportError:
+    ClientSession = None
+    StdioServerParameters = None
+    stdio_client = None
+    logger.warning(
+        "mcp package not installed (requires Python >=3.10). "
+        "MCP client functionality is disabled."
+    )
+
+
+def is_mcp_available() -> bool:
+    """Check if the mcp package is available."""
+    return _mcp_available
 
 
 class MCPConnectionError(Exception):
@@ -67,6 +87,11 @@ class BaseMCPClient(ABC):
         Raises:
             MCPConnectionError: If connection fails
         """
+        if not _mcp_available:
+            raise MCPConnectionError(
+                "mcp package is not installed (requires Python >=3.10). "
+                "MCP client functionality is disabled."
+            )
         try:
             if self.transport == "stdio" and self.command:
                 self._server_params = StdioServerParameters(

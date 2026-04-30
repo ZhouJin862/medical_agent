@@ -23,6 +23,10 @@ from src.interface.api.routes import skills_v2
 from src.interface.api.routes import skills_agent
 from src.interface.api.routes import composite_skills
 from src.interface.api.routes import skill_packages
+from src.interface.api.routes import prompts
+from src.interface.api.routes import assessment
+from src.interface.api.routes import questionnaire
+from src.interface.api.routes import insight
 from src.interface.api.dto.response import HealthResponse
 from src.infrastructure.database import init_database, close_database
 
@@ -104,6 +108,10 @@ def create_application() -> FastAPI:
     app.include_router(skills_agent.router)
     app.include_router(composite_skills.router)
     app.include_router(skill_packages.router)
+    app.include_router(prompts.router)
+    app.include_router(assessment.router)
+    app.include_router(questionnaire.router)
+    app.include_router(insight.router)
 
     # Add health check route
     @app.get("/api/health", response_model=HealthResponse, tags=["health"])
@@ -132,11 +140,11 @@ def create_application() -> FastAPI:
     # Test agent endpoint
     @app.post("/api/test-agent")
     async def test_agent(request: dict):
-        """Test the MedicalAgent directly."""
+        """Test the agent directly."""
         try:
-            from src.infrastructure.agent.graph import MedicalAgent
+            from src.infrastructure.agent.skills_integration import SkillsIntegratedAgent
 
-            agent = MedicalAgent()
+            agent = SkillsIntegratedAgent()
             result = await agent.process(
                 user_input=request.get("input", "test"),
                 patient_id=request.get("patient_id", "test-001"),
@@ -223,18 +231,18 @@ def create_application() -> FastAPI:
 
 
 async def handle_websocket_message(websocket: WebSocket, message: dict, patient_id: str):
-    """Handle incoming WebSocket message using the MedicalAgent."""
+    """Handle incoming WebSocket message using the agent."""
     message_id = message.get("message_id", f"msg-{datetime.now().timestamp()}")
     content = message.get("content", "")
 
     logger.info(f"Processing message from {patient_id}: {content}")
 
     try:
-        # Import MedicalAgent
-        from src.infrastructure.agent.graph import MedicalAgent
+        # Import SkillsIntegratedAgent
+        from src.infrastructure.agent.skills_integration import SkillsIntegratedAgent
 
         # Create agent and process the message
-        agent = MedicalAgent()
+        agent = SkillsIntegratedAgent()
         result_state = await agent.process(
             user_input=content,
             patient_id=patient_id,

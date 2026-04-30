@@ -9,6 +9,7 @@ import re
 import json
 import subprocess
 import tempfile
+import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -196,17 +197,6 @@ class SkillWorkflowExecutor:
             json.dump(input_data, temp_input, ensure_ascii=False, indent=2)
             temp_input.close()
 
-            # Debug: Write input data for all steps
-            try:
-                debug_path = Path("C:/Users/jinit/work/code/medical_agent/debug_all_steps_input.json")
-                with open(debug_path, 'a', encoding='utf-8') as f:
-                    f.write(f"\n=== Step {step.step_number}: {step.title} ===\n")
-                    f.write(f"Input keys: {list(input_data.keys())}\n")
-                    if 'health_metrics' in input_data:
-                        f.write(f"health_metrics keys: {list(input_data['health_metrics'].keys())}\n")
-            except:
-                pass
-
             # 构建命令 - 只传递必要参数和已知安全的标志
             # 忽略SKILL.md中的所有参数，只使用实际输入文件和已知安全的标志
             cmd = [
@@ -245,23 +235,6 @@ class SkillWorkflowExecutor:
                         cmd.append(processed_args[i + 1])
                         skip_next = True
 
-            # Debug: Write command to file (append all steps)
-            try:
-                debug_path = Path("C:/Users/jinit/work/code/medical_agent/debug_all_commands.txt")
-                with open(debug_path, 'a', encoding='utf-8') as f:
-                    f.write(f"\n=== Step {step.step_number}: {step.title} ===\n")
-                    f.write(f"Command: {' '.join(cmd)}\n")
-                    f.write(f"Script: {script_path}\n")
-            except:
-                pass
-
-            # Debug: Write command to file (legacy, for last step)
-            try:
-                debug_path = Path("C:/Users/jinit/work/code/medical_agent/debug_executor_command.txt")
-                debug_path.write_text(f"Command: {' '.join(cmd)}\n\nArgs from SKILL.md: {step.args}\n\nProcessed args: {processed_args}")
-            except:
-                pass
-
             # 执行脚本
             result = subprocess.run(
                 cmd,
@@ -269,7 +242,7 @@ class SkillWorkflowExecutor:
                 text=True,
                 timeout=30,
                 cwd=str(script_full_path.parent.absolute()),
-                env=env or {},
+                env=env or os.environ.copy(),
                 encoding='utf-8',
                 errors='replace'
             )
@@ -277,13 +250,6 @@ class SkillWorkflowExecutor:
             if result.returncode == 0:
                 try:
                     output = json.loads(result.stdout)
-                    # Debug: Write stdout for step 2 (风险评估计算)
-                    try:
-                        if step.step_number == 2 or "风险评估" in step.title:
-                            debug_path = Path("C:/Users/jinit/work/code/medical_agent/debug_step2_stdout.txt")
-                            debug_path.write_text(f"STDOUT:\n{result.stdout}\n\nPARSED OUTPUT:\n{json.dumps(output, ensure_ascii=False, indent=2)}")
-                    except:
-                        pass
                     return {
                         "step": step.step_number,
                         "title": step.title,
@@ -291,13 +257,6 @@ class SkillWorkflowExecutor:
                         "output": output
                     }
                 except json.JSONDecodeError as e:
-                    # Debug: Write stdout for failed JSON parse
-                    try:
-                        if step.step_number == 2 or "风险评估" in step.title:
-                            debug_path = Path("C:/Users/jinit/work/code/medical_agent/debug_step2_stdout.txt")
-                            debug_path.write_text(f"STDOUT (JSON parse failed):\n{result.stdout}\n\nError: {e}")
-                    except:
-                        pass
                     return {
                         "step": step.step_number,
                         "title": step.title,
@@ -381,23 +340,6 @@ class SkillWorkflowExecutor:
                 step_result = self.execute_step(step, current_data, env)
                 results["step_results"].append(step_result)
 
-                # Debug: Log step execution
-                try:
-                    debug_path = Path("C:/Users/jinit/work/code/medical_agent/debug_workflow_steps.txt")
-                    with open(debug_path, 'a', encoding='utf-8') as f:
-                        f.write(f"\n=== Step {step.step_number}: {step.title} ===\n")
-                        f.write(f"Status: {step_result.get('status')}\n")
-                        if "output" in step_result:
-                            output = step_result["output"]
-                            if isinstance(output, dict):
-                                f.write(f"Output keys: {list(output.keys())}\n")
-                                if "data" in output and isinstance(output["data"], dict):
-                                    f.write(f"Data status: {output['data'].get('status')}\n")
-                                if step == steps[-1]:  # Last step - show more detail
-                                    f.write(f"Final output structure: {json.dumps(output, ensure_ascii=False, indent=2)[:500]}...\n")
-                except:
-                    pass
-
                 if step_result["status"] == "error":
                     results["success"] = False
                     results["error"] = f"Step {step.step_number} ({step.title}) failed: {step_result.get('error', 'Unknown error')}"
@@ -406,13 +348,6 @@ class SkillWorkflowExecutor:
                 # Check for incomplete status - stop workflow and return the incomplete data
                 if step_result["status"] == "success" and "output" in step_result:
                     output = step_result["output"]
-                    # Debug: Write step output to file
-                    try:
-                        if "risk_calculator" in str(step):
-                            debug_path = Path("C:/Users/jinit/work/code/medical_agent/debug_step2_output.json")
-                            debug_path.write_text(json.dumps(output, ensure_ascii=False, indent=2))
-                    except:
-                        pass
 
                     if isinstance(output, dict) and output.get("data", {}).get("status") == "incomplete":
                         # Found incomplete status - return this as the final result

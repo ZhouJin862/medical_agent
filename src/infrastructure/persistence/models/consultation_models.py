@@ -9,8 +9,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import Enum as SQLEnum, ForeignKey, String, Text, Index
-from sqlalchemy.dialects.mysql import CHAR, JSON
+from sqlalchemy import BigInteger, Enum as SQLEnum, String, Text, Index
+from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.infrastructure.persistence.models.base import BaseModel
@@ -42,17 +42,17 @@ class ConsultationModel(BaseModel):
     __tablename__ = "consultations"
 
     consultation_id: Mapped[str] = mapped_column(
-        CHAR(36),
+        String(36),
         unique=True,
         nullable=False,
         index=True,
     )
     patient_id: Mapped[str] = mapped_column(
-        CHAR(36),
+        String(36),
         nullable=False,
         index=True,
     )
-    status: Mapped[ConsultationStatus] = mapped_column(
+    consult_status: Mapped[ConsultationStatus] = mapped_column(
         SQLEnum(ConsultationStatus),
         default=ConsultationStatus.ACTIVE,
         nullable=False,
@@ -65,11 +65,13 @@ class ConsultationModel(BaseModel):
         back_populates="consultation",
         cascade="all, delete-orphan",
         lazy="selectin",
-        order_by="MessageModel.created_at",
+        order_by="MessageModel.created_date",
+        primaryjoin="ConsultationModel.id == MessageModel.consultation_id",
+        foreign_keys="MessageModel.consultation_id",
     )
 
     __table_args__ = (
-        Index("idx_consultation_patient_status", "patient_id", "status"),
+        Index("idx_consultation_patient_status", "patient_id", "consult_status"),
     )
 
 
@@ -82,9 +84,8 @@ class MessageModel(BaseModel):
 
     __tablename__ = "messages"
 
-    consultation_id: Mapped[str] = mapped_column(
-        CHAR(36),
-        ForeignKey("consultations.id", ondelete="CASCADE"),
+    consultation_id: Mapped[int] = mapped_column(
+        BigInteger,
         nullable=False,
         index=True,
     )
@@ -92,7 +93,7 @@ class MessageModel(BaseModel):
         SQLEnum(MessageRole),
         nullable=False,
     )
-    content: Mapped[str] = mapped_column(
+    msg_content: Mapped[str] = mapped_column(
         Text,
         nullable=False,
     )
@@ -110,10 +111,12 @@ class MessageModel(BaseModel):
     consultation: Mapped["ConsultationModel"] = relationship(
         "ConsultationModel",
         back_populates="messages",
+        primaryjoin="MessageModel.consultation_id == ConsultationModel.id",
+        foreign_keys=[consultation_id],
     )
 
     __table_args__ = (
-        Index("idx_message_consultation_created", "consultation_id", "created_at"),
+        Index("idx_message_consultation_created", "consultation_id", "created_date"),
     )
 
     def set_structured_metadata(self, data: dict[str, Any] | None) -> None:

@@ -50,11 +50,11 @@ class ConsultationRepositoryImpl(IConsultationRepository):
             id=uuid4().hex,
             consultation_id=consultation_id,
             patient_id=patient_id,
-            status=status,
+            consult_status=status,
         )
         self._session.add(consultation)
         await self._session.flush()
-        # Refresh to load all attributes (created_at, updated_at)
+        # Refresh to load all attributes (created_date, updated_date)
         await self._session.refresh(consultation)
         return consultation.to_dict()
 
@@ -77,9 +77,9 @@ class ConsultationRepositoryImpl(IConsultationRepository):
             select(ConsultationModel)
             .where(
                 ConsultationModel.patient_id == patient_id,
-                ConsultationModel.status == ConsultationStatus.ACTIVE,
+                ConsultationModel.consult_status == ConsultationStatus.ACTIVE,
             )
-            .order_by(desc(ConsultationModel.created_at))
+            .order_by(desc(ConsultationModel.created_date))
         )
         result = await self._session.execute(stmt)
         consultation = result.scalar_one_or_none()
@@ -95,7 +95,7 @@ class ConsultationRepositoryImpl(IConsultationRepository):
         result = await self._session.execute(stmt)
         consultation = result.scalar_one_or_none()
         if consultation:
-            consultation.status = status
+            consultation.consult_status = status
             return True
         return False
 
@@ -122,13 +122,13 @@ class ConsultationRepositoryImpl(IConsultationRepository):
             id=uuid4().hex,
             consultation_id=consultation_internal_id,
             role=role,
-            content=content,
+            msg_content=content,
             intent=intent,
             structured_metadata=structured_metadata,
         )
         self._session.add(message)
         await self._session.flush()
-        # Refresh to load all attributes (created_at)
+        # Refresh to load all attributes (created_date)
         await self._session.refresh(message)
         return message.to_dict()
 
@@ -154,15 +154,15 @@ class ConsultationRepositoryImpl(IConsultationRepository):
         )
 
         if before_id:
-            before_stmt = select(MessageModel.created_at).where(
-                MessageModel.id == before_id
+            before_stmt = select(MessageModel.created_date).where(
+                MessageModel.id == int(before_id)
             )
             before_result = await self._session.execute(before_stmt)
             before_time = before_result.scalar_one_or_none()
             if before_time:
-                stmt = stmt.where(MessageModel.created_at < before_time)
+                stmt = stmt.where(MessageModel.created_date < before_time)
 
-        stmt = stmt.order_by(MessageModel.created_at).limit(limit)
+        stmt = stmt.order_by(MessageModel.created_date).limit(limit)
         result = await self._session.execute(stmt)
         messages = result.scalars().all()
         return [msg.to_dict() for msg in messages]
@@ -176,7 +176,7 @@ class ConsultationRepositoryImpl(IConsultationRepository):
         stmt = (
             select(ConsultationModel)
             .where(ConsultationModel.patient_id == patient_id)
-            .order_by(desc(ConsultationModel.created_at))
+            .order_by(desc(ConsultationModel.created_date))
             .limit(limit)
         )
         result = await self._session.execute(stmt)
@@ -244,7 +244,7 @@ class ConsultationRepositoryImpl(IConsultationRepository):
             MessageModel.consultation_id == consultation_internal_id,
             MessageModel.intent == intent,
         )
-        stmt = stmt.order_by(MessageModel.created_at)
+        stmt = stmt.order_by(MessageModel.created_date)
         result = await self._session.execute(stmt)
         messages = result.scalars().all()
         return [msg.to_dict() for msg in messages]

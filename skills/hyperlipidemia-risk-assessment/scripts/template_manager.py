@@ -12,9 +12,8 @@
 import json
 import sys
 import argparse
-import os
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from pathlib import Path
 
 try:
@@ -32,11 +31,6 @@ class TemplateManager:
     
     # 内置模板
     BUILTIN_TEMPLATES = {
-        'default': 'default_template.md',
-        'simple': 'simple_template.md',
-        'insurance': 'insurance_template.md',
-        'clinical': 'clinical_template.md',
-        'personal': 'personal_template.md',
         'report': 'report_template.md'
     }
     
@@ -363,6 +357,105 @@ def _extract_template_vars_from_risk_assessment(data: Dict[str, Any]) -> Dict[st
     }
 
 
+def _build_structured_result(risk_data, overall_risk, health_metrics, input_data):
+    """Build structured result for unified assessment JSON schema."""
+    risk_grade = overall_risk.get('risk_grade', '') or overall_risk.get('risk_level', '')
+    category = _map_risk_to_category(risk_grade)
+
+    # 1. Population classification
+    population_classification = {
+        "categories": [{"category": category, "label": risk_grade or category}],
+        "primary_category": category,
+        "basis": [],
+        "score": 0,
+    }
+
+    # 2. Recommended data collection (check for missing vitals)
+    recommended = []
+    if not risk_data.get('tc'):
+        recommended.append({"item": "总胆固醇(TC)", "reason": "缺少总胆固醇数据"})
+    if not risk_data.get('tg'):
+        recommended.append({"item": "甘油三酯(TG)", "reason": "缺少甘油三酯数据"})
+    if not risk_data.get('ldl_c'):
+        recommended.append({"item": "低密度脂蛋白胆固醇(LDL-C)", "reason": "缺少LDL-C数据"})
+    if not risk_data.get('hdl_c'):
+        recommended.append({"item": "高密度脂蛋白胆固醇(HDL-C)", "reason": "缺少HDL-C数据"})
+
+    # 3. Abnormal indicators
+    abnormal = []
+    tc = risk_data.get('tc')
+    tg = risk_data.get('tg')
+    ldl_c = risk_data.get('ldl_c')
+    hdl_c = risk_data.get('hdl_c')
+    if tc:
+        try:
+            tv = float(tc)
+            if tv >= 5.2:
+                abnormal.append({"indicator": "总胆固醇(TC)", "value": f"{tc} mmol/L", "reference": "<5.2 mmol/L"})
+        except (ValueError, TypeError):
+            pass
+    if tg:
+        try:
+            tv = float(tg)
+            if tv >= 1.7:
+                abnormal.append({"indicator": "甘油三酯(TG)", "value": f"{tg} mmol/L", "reference": "<1.7 mmol/L"})
+        except (ValueError, TypeError):
+            pass
+    if ldl_c:
+        try:
+            lv = float(ldl_c)
+            if lv >= 3.4:
+                abnormal.append({"indicator": "低密度脂蛋白胆固醇(LDL-C)", "value": f"{ldl_c} mmol/L", "reference": "<3.4 mmol/L"})
+        except (ValueError, TypeError):
+            pass
+    if hdl_c:
+        try:
+            hv = float(hdl_c)
+            if hv < 1.0:
+                abnormal.append({"indicator": "高密度脂蛋白胆固醇(HDL-C)", "value": f"{hdl_c} mmol/L", "reference": ">=1.0 mmol/L"})
+        except (ValueError, TypeError):
+            pass
+
+    # 4. Disease prediction
+    disease_prediction = []
+    risk_tier = risk_data.get('risk_tier', '')
+    if risk_tier in ('极高危', '高危'):
+        disease_prediction.append({"disease": "动脉粥样硬化性心血管病(ASCVD)", "risk": "高", "description": "心血管事件风险显著增加"})
+    elif risk_tier == '中危':
+        disease_prediction.append({"disease": "动脉粥样硬化性心血管病(ASCVD)", "risk": "中", "description": "存在血脂异常相关心血管风险"})
+    disorder_type = risk_data.get('lipid_disorder_type', '')
+    if disorder_type:
+        disease_prediction.append({"disease": f"血脂异常({disorder_type})", "risk": "中", "description": "血脂代谢异常需持续关注"})
+
+    # 5. Intervention prescriptions
+    prescriptions = []
+    prescriptions.append({"type": "饮食", "content": ["低脂饮食", "减少饱和脂肪和反式脂肪摄入", "增加膳食纤维"], "priority": "高"})
+    prescriptions.append({"type": "运动", "content": ["每周150分钟以上中等强度有氧运动"], "priority": "高"})
+    if risk_tier in ('极高危', '高危'):
+        prescriptions.append({"type": "药物治疗", "content": ["建议在医生指导下进行降脂药物治疗"], "priority": "高"})
+
+    return {
+        "population_classification": population_classification,
+        "recommended_data_collection": recommended,
+        "abnormal_indicators": abnormal,
+        "disease_prediction": disease_prediction,
+        "intervention_prescriptions": prescriptions,
+    }
+
+
+def _map_risk_to_category(risk_grade):
+    if not risk_grade:
+        return "未知"
+    grade = risk_grade.lower()
+    if "很高危" in grade or "极高" in grade:
+        return "专病"
+    if "高危" in grade or "高" in grade:
+        return "慢病"
+    if "中危" in grade or "中" in grade:
+        return "亚健康"
+    return "健康"
+
+
 def main():
     # 配置 UTF-8 编码输出（Windows 兼容）
     import io
@@ -432,11 +525,15 @@ def main():
 
             if args.format == 'modules':
                 # 分模块输出
+                overall_risk = input_data.get('overall_risk', {})
+                health_metrics = input_data.get('lipid_assessment', {})
+                structured_result = _build_structured_result(template_vars, overall_risk, health_metrics, input_data)
                 result = {
                     "success": True,
                     "template": args.template,
                     "modules": sections,
-                    "total_modules": len(sections)
+                    "total_modules": len(sections),
+                    "structured_result": structured_result
                 }
             elif args.format == 'markdown':
                 # 完整 markdown 输出

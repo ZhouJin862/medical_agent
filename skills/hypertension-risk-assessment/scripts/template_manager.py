@@ -12,9 +12,8 @@
 import json
 import sys
 import argparse
-import os
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from pathlib import Path
 
 try:
@@ -32,11 +31,6 @@ class TemplateManager:
     
     # 内置模板
     BUILTIN_TEMPLATES = {
-        'default': 'default_template.md',
-        'simple': 'simple_template.md',
-        'insurance': 'insurance_template.md',
-        'clinical': 'clinical_template.md',
-        'personal': 'personal_template.md',
         'report': 'report_template.md'
     }
     
@@ -404,6 +398,99 @@ def _extract_template_vars_from_risk_assessment(data: Dict[str, Any]) -> Dict[st
     }
 
 
+def _build_structured_result(risk_data, overall_risk, health_metrics, input_data):
+    """Build structured result for unified assessment JSON schema."""
+    risk_grade = overall_risk.get('risk_grade', '') or overall_risk.get('risk_level', '')
+    category = _map_risk_to_category(risk_grade)
+
+    # 1. Population classification
+    population_classification = {
+        "categories": [{"category": category, "label": risk_grade or category}],
+        "primary_category": category,
+        "basis": [],
+        "score": 0,
+    }
+
+    # 2. Recommended data collection (check for missing vitals)
+    recommended = []
+    if not risk_data.get('systolic') or not risk_data.get('diastolic'):
+        recommended.append({"item": "血压测量", "reason": "缺少血压数据"})
+    if not risk_data.get('hcy'):
+        recommended.append({"item": "同型半胱氨酸(Hcy)", "reason": "H型高血压评估需要"})
+    if not input_data.get('organ_damage', {}).get('assessment'):
+        recommended.append({"item": "靶器官损害检查", "reason": "需要评估靶器官损害情况"})
+
+    # 3. Abnormal indicators
+    abnormal = []
+    systolic = risk_data.get('systolic')
+    diastolic = risk_data.get('diastolic')
+    if systolic:
+        try:
+            sv = float(systolic)
+            if sv >= 140:
+                abnormal.append({"indicator": "收缩压", "value": f"{systolic} mmHg", "reference": "<140 mmHg"})
+        except (ValueError, TypeError):
+            pass
+    if diastolic:
+        try:
+            dv = float(diastolic)
+            if dv >= 90:
+                abnormal.append({"indicator": "舒张压", "value": f"{diastolic} mmHg", "reference": "<90 mmHg"})
+        except (ValueError, TypeError):
+            pass
+    hcy_val = risk_data.get('hcy')
+    if hcy_val:
+        try:
+            hv = float(hcy_val)
+            if hv >= 10:
+                abnormal.append({"indicator": "同型半胱氨酸(Hcy)", "value": f"{hcy_val} μmol/L", "reference": "<10 μmol/L"})
+        except (ValueError, TypeError):
+            pass
+
+    # 4. Disease prediction
+    disease_prediction = []
+    risk_level = risk_data.get('risk_level', '')
+    if risk_level in ('高危', '很高危'):
+        disease_prediction.append({"disease": "高血压并发症", "risk": "高", "description": "心脑血管事件风险显著增加"})
+    if risk_data.get('organ_damage_status') and risk_data.get('organ_damage_status') != '未评估':
+        disease_prediction.append({"disease": "靶器官损害", "risk": "中高", "description": "心脏、肾脏、血管等靶器官可能受损"})
+    if hcy_val:
+        try:
+            if float(hcy_val) >= 10:
+                disease_prediction.append({"disease": "H型高血压", "risk": "中", "description": "伴高同型半胱氨酸血症，脑卒中风险增加"})
+        except (ValueError, TypeError):
+            pass
+
+    # 5. Intervention prescriptions
+    prescriptions = []
+    prescriptions.append({"type": "饮食", "content": ["低钠饮食，每日钠盐摄入<5g", "增加钾盐摄入"], "priority": "高"})
+    prescriptions.append({"type": "运动", "content": ["每周150分钟以上中等强度有氧运动"], "priority": "高"})
+    prescriptions.append({"type": "监测", "content": ["每日监测血压", "定期复查"], "priority": "高"})
+    if risk_level in ('高危', '很高危'):
+        prescriptions.append({"type": "药物治疗", "content": ["建议在医生指导下进行降压药物治疗"], "priority": "高"})
+
+    return {
+        "population_classification": population_classification,
+        "recommended_data_collection": recommended,
+        "abnormal_indicators": abnormal,
+        "disease_prediction": disease_prediction,
+        "intervention_prescriptions": prescriptions,
+    }
+
+
+def _map_risk_to_category(risk_grade):
+    if not risk_grade:
+        return "未知"
+    grade = risk_grade.lower()
+    if "很高危" in grade or "极高" in grade:
+        return "专病"
+    if "高危" in grade or "高" in grade:
+        return "慢病"
+    if "中危" in grade or "中" in grade:
+        return "亚健康"
+    return "健康"
+
+
 def main():
     # 配置 UTF-8 编码输出（Windows 兼容）
     import io
@@ -473,11 +560,15 @@ def main():
 
             if args.format == 'modules':
                 # 分模块输出
+                overall_risk = input_data.get('risk_stratification', {})
+                health_metrics = input_data.get('cardiovascular_risk', {})
+                structured_result = _build_structured_result(template_vars, overall_risk, health_metrics, input_data)
                 result = {
                     "success": True,
                     "template": args.template,
                     "modules": sections,
-                    "total_modules": len(sections)
+                    "total_modules": len(sections),
+                    "structured_result": structured_result
                 }
             elif args.format == 'markdown':
                 # 完整 markdown 输出

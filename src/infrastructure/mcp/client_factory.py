@@ -94,16 +94,24 @@ class MCPClientFactory:
 
 # Import and register client classes
 def _register_default_clients():
-    """Register default MCP clients."""
-    from .clients.profile_client import ProfileMCPClient
-    from .clients.triage_client import TriageMCPClient
-    from .clients.medication_client import MedicationMCPClient
-    from .clients.service_client import ServiceMCPClient
+    """Register default MCP clients. Skipped if mcp package is not available."""
+    try:
+        from .base_client import is_mcp_available
+        if not is_mcp_available():
+            logger.info("MCP package not available, skipping client registration")
+            return
 
-    MCPClientFactory.register_client("profile_server", ProfileMCPClient)
-    MCPClientFactory.register_client("triage_server", TriageMCPClient)
-    MCPClientFactory.register_client("medication_server", MedicationMCPClient)
-    MCPClientFactory.register_client("service_server", ServiceMCPClient)
+        from .clients.profile_client import ProfileMCPClient
+        from .clients.triage_client import TriageMCPClient
+        from .clients.medication_client import MedicationMCPClient
+        from .clients.service_client import ServiceMCPClient
+
+        MCPClientFactory.register_client("profile_server", ProfileMCPClient)
+        MCPClientFactory.register_client("triage_server", TriageMCPClient)
+        MCPClientFactory.register_client("medication_server", MedicationMCPClient)
+        MCPClientFactory.register_client("service_server", ServiceMCPClient)
+    except Exception as e:
+        logger.warning(f"Failed to register MCP clients: {e}")
 
 
 # Auto-register clients on import

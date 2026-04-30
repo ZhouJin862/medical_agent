@@ -7,8 +7,7 @@ to be configured dynamically instead of hardcoded.
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import String, Text, Float, Integer, JSON, Boolean
-from sqlalchemy.dialects.mysql import CHAR
+from sqlalchemy import String, Text, Float, Integer, JSON, Boolean, BigInteger
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.persistence.models.base import BaseModel
@@ -50,13 +49,13 @@ class RuleModel(BaseModel):
     __tablename__ = "rules"
 
     # Basic information
-    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    rule_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rule_desc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Rule classification
     rule_type: Mapped[str] = mapped_column(String(50), nullable=False, default=RuleType.THRESHOLD)
-    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    rule_category: Mapped[str] = mapped_column(String(50), nullable=False)
     target_type: Mapped[str] = mapped_column(String(50), nullable=False, default=RuleTargetType.VITAL_SIGN)
 
     # Rule definition (JSON configuration)
@@ -67,18 +66,18 @@ class RuleModel(BaseModel):
         String(50), nullable=True, index=True,
         help_text="Associated disease code (for disease-specific rules)"
     )
-    priority: Mapped[int] = mapped_column(Integer, default=0, help_text="Evaluation priority (higher first)")
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    rule_priority: Mapped[int] = mapped_column(Integer, default=0, help_text="Evaluation priority (higher first)")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Version control for rule changes
-    version: Mapped[str] = mapped_column(String(20), default="1.0.0")
+    rule_version: Mapped[str] = mapped_column(String(20), default="1.0.0")
     change_log: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert model to dictionary."""
         result = super().to_dict()
         result["rule_type"] = self.rule_type
-        result["category"] = self.category
+        result["rule_category"] = self.rule_category
         result["target_type"] = self.target_type
         return result
 
@@ -92,14 +91,14 @@ class RuleExecutionHistoryModel(BaseModel):
 
     __tablename__ = "rule_execution_history"
 
-    rule_id: Mapped[str] = mapped_column(CHAR(36), nullable=False, index=True)
+    rule_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     patient_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
 
     # Input data
     input_data: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
 
     # Execution result
-    result: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+    exec_result: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
     matched: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
     # Execution metadata
@@ -125,9 +124,9 @@ class VitalSignStandardModel(BaseModel):
 
     __tablename__ = "vital_sign_standards"
 
-    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    standard_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    standard_desc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Vital sign type
     vital_sign_type: Mapped[str] = mapped_column(
@@ -159,7 +158,7 @@ class VitalSignStandardModel(BaseModel):
     # Age-specific adjustments (JSON)
     age_adjustments: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert model to dictionary."""
@@ -222,9 +221,9 @@ class RiskScoreRuleModel(BaseModel):
 
     __tablename__ = "risk_score_rules"
 
-    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    rule_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rule_desc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Disease association
     disease_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
@@ -250,8 +249,8 @@ class RiskScoreRuleModel(BaseModel):
     }
     """
 
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    version: Mapped[str] = mapped_column(String(20), default="1.0.0")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    rule_version: Mapped[str] = mapped_column(String(20), default="1.0.0")
 
     def calculate_score(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """

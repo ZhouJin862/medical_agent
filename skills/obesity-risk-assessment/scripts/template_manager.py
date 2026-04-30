@@ -12,9 +12,8 @@
 import json
 import sys
 import argparse
-import os
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from pathlib import Path
 
 try:
@@ -32,11 +31,6 @@ class TemplateManager:
     
     # 内置模板
     BUILTIN_TEMPLATES = {
-        'default': 'default_template.md',
-        'simple': 'simple_template.md',
-        'insurance': 'insurance_template.md',
-        'clinical': 'clinical_template.md',
-        'personal': 'personal_template.md',
         'report': 'report_template.md'
     }
     
@@ -385,6 +379,98 @@ def _extract_template_vars_from_risk_assessment(data: Dict[str, Any]) -> Dict[st
     }
 
 
+def _build_structured_result(risk_data, overall_risk, health_metrics, input_data):
+    """Build structured result for unified assessment JSON schema."""
+    risk_grade = overall_risk.get('risk_grade', '') or overall_risk.get('risk_level', '')
+    category = _map_risk_to_category(risk_grade)
+
+    # 1. Population classification
+    population_classification = {
+        "categories": [{"category": category, "label": risk_grade or category}],
+        "primary_category": category,
+        "basis": [],
+        "score": 0,
+    }
+
+    # 2. Recommended data collection (check for missing vitals)
+    recommended = []
+    if not risk_data.get('bmi'):
+        recommended.append({"item": "BMI计算(身高/体重)", "reason": "缺少BMI数据"})
+    if not risk_data.get('waist'):
+        recommended.append({"item": "腰围测量", "reason": "缺少腰围数据"})
+    body_fat = input_data.get('body_fat', {})
+    if not body_fat.get('available'):
+        recommended.append({"item": "体脂率检测", "reason": "需要评估体脂率"})
+
+    # 3. Abnormal indicators
+    abnormal = []
+    bmi_val = risk_data.get('bmi')
+    if bmi_val:
+        try:
+            bv = float(bmi_val)
+            if bv >= 28:
+                abnormal.append({"indicator": "BMI", "value": f"{bmi_val} kg/m²", "reference": "18.5-23.9 kg/m²"})
+            elif bv >= 24:
+                abnormal.append({"indicator": "BMI", "value": f"{bmi_val} kg/m²", "reference": "18.5-23.9 kg/m²"})
+        except (ValueError, TypeError):
+            pass
+    waist_val = risk_data.get('waist')
+    waist_threshold = risk_data.get('waist_threshold', 90)
+    if waist_val:
+        try:
+            wv = float(waist_val)
+            wt = float(waist_threshold)
+            if wv >= wt:
+                abnormal.append({"indicator": "腰围", "value": f"{waist_val} cm", "reference": f"<{waist_threshold} cm"})
+        except (ValueError, TypeError):
+            pass
+
+    # 4. Disease prediction
+    disease_prediction = []
+    risk_level = overall_risk.get('risk_level', '')
+    metabolic_diag = risk_data.get('metabolic_syndrome_diagnosis', '')
+    if '代谢综合征' in metabolic_diag and '未' not in metabolic_diag:
+        disease_prediction.append({"disease": "代谢综合征", "risk": "高", "description": "多种代谢异常聚集，心血管风险显著增加"})
+    if risk_level in ('高风险',):
+        disease_prediction.append({"disease": "代谢综合征风险", "risk": "高", "description": "肥胖相关代谢异常风险增加"})
+    if bmi_val:
+        try:
+            bv = float(bmi_val)
+            if bv >= 28:
+                disease_prediction.append({"disease": "肥胖相关疾病", "risk": "高", "description": "2型糖尿病、高血压、冠心病等风险显著增加"})
+        except (ValueError, TypeError):
+            pass
+
+    # 5. Intervention prescriptions
+    prescriptions = []
+    prescriptions.append({"type": "饮食", "content": ["控制每日总热量摄入", "减少高热量食物", "增加蔬果和膳食纤维"], "priority": "高"})
+    prescriptions.append({"type": "运动", "content": ["每周150分钟以上中等强度有氧运动", "减少久坐"], "priority": "高"})
+    prescriptions.append({"type": "睡眠", "content": ["保证充足睡眠，规律作息", "避免熬夜"], "priority": "中"})
+    if risk_level in ('高风险',):
+        prescriptions.append({"type": "体重管理", "content": ["建议在医生指导下进行系统体重管理"], "priority": "高"})
+
+    return {
+        "population_classification": population_classification,
+        "recommended_data_collection": recommended,
+        "abnormal_indicators": abnormal,
+        "disease_prediction": disease_prediction,
+        "intervention_prescriptions": prescriptions,
+    }
+
+
+def _map_risk_to_category(risk_grade):
+    if not risk_grade:
+        return "未知"
+    grade = risk_grade.lower()
+    if "很高危" in grade or "极高" in grade:
+        return "专病"
+    if "高危" in grade or "高" in grade:
+        return "慢病"
+    if "中危" in grade or "中" in grade:
+        return "亚健康"
+    return "健康"
+
+
 def main():
     # 配置 UTF-8 编码输出（Windows 兼容）
     import io
@@ -454,11 +540,15 @@ def main():
 
             if args.format == 'modules':
                 # 分模块输出
+                overall_risk = input_data.get('overall_risk', {})
+                health_metrics = input_data.get('bmi_assessment', {})
+                structured_result = _build_structured_result(template_vars, overall_risk, health_metrics, input_data)
                 result = {
                     "success": True,
                     "template": args.template,
                     "modules": sections,
-                    "total_modules": len(sections)
+                    "total_modules": len(sections),
+                    "structured_result": structured_result
                 }
             elif args.format == 'markdown':
                 # 完整 markdown 输出

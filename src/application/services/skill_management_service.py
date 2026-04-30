@@ -92,16 +92,15 @@ class SkillManagementApplicationService:
 
         # Create skill
         skill = SkillModel(
-            id=uuid4().hex,
-            name=name,
+            skill_name=name,
             display_name=display_name,
-            description=description,
-            type=SkillType(skill_type),
+            skill_desc=description,
+            skill_type=SkillType(skill_type),
             category=SkillCategory(category) if category else None,
-            enabled=True,
-            version="1.0.0",
+            is_enabled=True,
+            skill_version="1.0.0",
             intent_keywords=intent_keywords,
-            config=config,
+            skill_config=config,
         )
         self._session.add(skill)
         await self._session.flush()
@@ -109,7 +108,6 @@ class SkillManagementApplicationService:
         # Create model config if provided
         if model_config:
             skill_model_config = SkillModelConfigModel(
-                id=uuid4().hex,
                 skill_id=skill.id,
                 model_provider=ModelProvider(
                     model_config.get("provider", "internal")
@@ -118,7 +116,7 @@ class SkillManagementApplicationService:
                 temperature=model_config.get("temperature"),
                 max_tokens=model_config.get("max_tokens"),
                 top_p=model_config.get("top_p"),
-                config=model_config.get("extra_config"),
+                model_config=model_config.get("extra_config"),
             )
             self._session.add(skill_model_config)
 
@@ -126,11 +124,10 @@ class SkillManagementApplicationService:
         if prompts:
             for prompt_type, content in prompts.items():
                 prompt = SkillPromptModel(
-                    id=uuid4().hex,
                     skill_id=skill.id,
                     prompt_type=prompt_type,
-                    content=content,
-                    version="1.0.0",
+                    prompt_content=content,
+                    prompt_version="1.0.0",
                 )
                 self._session.add(prompt)
 
@@ -182,16 +179,16 @@ class SkillManagementApplicationService:
 
         conditions = []
         if skill_type:
-            conditions.append(SkillModel.type == SkillType(skill_type))
+            conditions.append(SkillModel.skill_type == SkillType(skill_type))
         if category:
             conditions.append(SkillModel.category == SkillCategory(category))
         if enabled_only:
-            conditions.append(SkillModel.enabled == True)
+            conditions.append(SkillModel.is_enabled == True)
 
         if conditions:
             stmt = stmt.where(and_(*conditions))
 
-        stmt = stmt.order_by(SkillModel.created_at.desc())
+        stmt = stmt.order_by(SkillModel.created_date.desc())
 
         result = await self._session.execute(stmt)
         skills = result.scalars().all()
@@ -229,11 +226,11 @@ class SkillManagementApplicationService:
         if display_name is not None:
             skill.display_name = display_name
         if description is not None:
-            skill.description = description
+            skill.skill_desc = description
         if intent_keywords is not None:
             skill.intent_keywords = intent_keywords
         if config is not None:
-            skill.config = config
+            skill.skill_config = config
 
         # Update version
         self._increment_version(skill)
@@ -261,7 +258,7 @@ class SkillManagementApplicationService:
         if not skill:
             raise SkillNotFoundException(skill_id)
 
-        skill.enabled = True
+        skill.is_enabled = True
         await self._session.flush()
 
         logger.info(f"Enabled skill {skill_id}")
@@ -285,7 +282,7 @@ class SkillManagementApplicationService:
         if not skill:
             raise SkillNotFoundException(skill_id)
 
-        skill.enabled = False
+        skill.is_enabled = False
         await self._session.flush()
 
         logger.info(f"Disabled skill {skill_id}")
@@ -398,16 +395,15 @@ class SkillManagementApplicationService:
 
         if prompt:
             # Update existing
-            prompt.content = content
+            prompt.prompt_content = content
             self._increment_version(prompt)
         else:
             # Create new
             prompt = SkillPromptModel(
-                id=uuid4().hex,
                 skill_id=skill.id,
                 prompt_type=prompt_type,
-                content=content,
-                version="1.0.0",
+                prompt_content=content,
+                prompt_version="1.0.0",
             )
             self._session.add(prompt)
 
@@ -480,11 +476,10 @@ class SkillManagementApplicationService:
             if "top_p" in model_config:
                 config.top_p = model_config["top_p"]
             if "extra_config" in model_config:
-                config.config = model_config["extra_config"]
+                config.model_config = model_config["extra_config"]
         else:
             # Create new
             config = SkillModelConfigModel(
-                id=uuid4().hex,
                 skill_id=skill.id,
                 model_provider=ModelProvider(
                     model_config.get("provider", "internal")
@@ -493,7 +488,7 @@ class SkillManagementApplicationService:
                 temperature=model_config.get("temperature"),
                 max_tokens=model_config.get("max_tokens"),
                 top_p=model_config.get("top_p"),
-                config=model_config.get("extra_config"),
+                model_config=model_config.get("extra_config"),
             )
             self._session.add(config)
 
@@ -505,22 +500,26 @@ class SkillManagementApplicationService:
 
     async def _get_skill_by_id(self, skill_id: str) -> SkillModel | None:
         """Get skill model by ID."""
-        stmt = select(SkillModel).where(SkillModel.id == skill_id)
+        stmt = select(SkillModel).where(SkillModel.id == int(skill_id))
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def _get_skill_by_name(self, name: str) -> SkillModel | None:
         """Get skill model by name."""
-        stmt = select(SkillModel).where(SkillModel.name == name)
+        stmt = select(SkillModel).where(SkillModel.skill_name == name)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     def _increment_version(self, model: Any) -> None:
         """Increment version of a model."""
-        current_version = model.version
+        current_version = model.skill_version if hasattr(model, 'skill_version') else model.prompt_version
         try:
             major, minor, patch = current_version.split(".")
             patch = str(int(patch) + 1)
-            model.version = f"{major}.{minor}.{patch}"
+            new_version = f"{major}.{minor}.{patch}"
         except (ValueError, AttributeError):
-            model.version = "2.0.0"
+            new_version = "2.0.0"
+        if hasattr(model, 'skill_version'):
+            model.skill_version = new_version
+        else:
+            model.prompt_version = new_version
