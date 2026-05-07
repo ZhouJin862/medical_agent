@@ -404,11 +404,63 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     category = _map_risk_to_category(risk_grade)
 
     # 1. Population classification
+    primary = "健康"
+    if "高危" in risk_grade or "很高危" in risk_grade:
+        primary = "重症"
+    elif "中危" in risk_grade or "中" in risk_grade:
+        primary = "慢病"
+    elif "低" in risk_grade:
+        primary = "亚健康"
+
+    # Grouping basis
+    disease_risks = []
+    disease_staging = ""
+    systolic = risk_data.get('systolic')
+    diastolic = risk_data.get('diastolic')
+    if systolic:
+        try:
+            sv = float(systolic)
+            if sv >= 180:
+                disease_risks.append("3级高血压")
+            elif sv >= 160:
+                disease_risks.append("2级高血压")
+            elif sv >= 140:
+                disease_risks.append("1级高血压")
+            elif sv >= 130:
+                disease_risks.append("正常高值血压")
+        except (ValueError, TypeError):
+            pass
+    hcy_val = risk_data.get('hcy')
+    if hcy_val:
+        try:
+            if float(hcy_val) >= 10:
+                disease_risks.append("H型高血压")
+        except (ValueError, TypeError):
+            pass
+
+    # Disease staging
+    if systolic:
+        try:
+            sv = float(systolic)
+            if sv >= 180:
+                disease_staging = "3级高血压"
+            elif sv >= 160:
+                disease_staging = "2级高血压"
+            elif sv >= 140:
+                disease_staging = "1级高血压"
+            elif sv >= 130:
+                disease_staging = "正常高值"
+        except (ValueError, TypeError):
+            pass
+
     population_classification = {
-        "categories": [{"category": category, "label": risk_grade or category}],
-        "primary_category": category,
-        "basis": [],
-        "score": 0,
+        "primary_category": primary,
+        "grouping_basis": [{
+            "disease": "高血压",
+            "type": disease_staging or "",
+            "level": risk_grade or "",
+            "note": f"{disease_staging}{risk_grade or ''}" if disease_staging else (risk_grade or ""),
+        }],
     }
 
     # 2. Recommended data collection (check for missing vitals)
@@ -469,21 +521,39 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     if risk_level in ('高危', '很高危'):
         prescriptions.append({"type": "药物治疗", "content": ["建议在医生指导下进行降压药物治疗"], "priority": "高"})
 
+    # 6. Risk warnings
+    risk_warnings = []
+    if systolic:
+        try:
+            sv = float(systolic)
+            if sv >= 180:
+                risk_warnings.append({"title": "血压严重偏高", "description": f"收缩压{systolic}mmHg，达3级高血压，需紧急就医", "level": "critical"})
+            elif sv >= 160:
+                risk_warnings.append({"title": "血压明显偏高", "description": f"收缩压{systolic}mmHg，达2级高血压，需积极降压", "level": "high"})
+            elif sv >= 140:
+                risk_warnings.append({"title": "血压未达标", "description": f"收缩压{systolic}mmHg，提示1级高血压，建议调整方案", "level": "medium"})
+        except (ValueError, TypeError):
+            pass
+    risk_level_val = risk_data.get('risk_level', '')
+    if risk_level_val in ('高危', '很高危'):
+        risk_warnings.append({"title": "心血管风险偏高", "description": "高血压合并高危因素，心脑血管事件风险显著增加", "level": "high"})
+
     return {
         "population_classification": population_classification,
         "recommended_data_collection": recommended,
         "abnormal_indicators": abnormal,
         "disease_prediction": disease_prediction,
         "intervention_prescriptions": prescriptions,
+        "risk_warnings": risk_warnings,
     }
 
 
 def _map_risk_to_category(risk_grade):
     if not risk_grade:
-        return "未知"
+        return "健康"
     grade = risk_grade.lower()
     if "很高危" in grade or "极高" in grade:
-        return "专病"
+        return "重症"
     if "高危" in grade or "高" in grade:
         return "慢病"
     if "中危" in grade or "中" in grade:

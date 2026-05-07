@@ -221,10 +221,16 @@ class ErrorResponse(BaseModel):
 # ── Standard Assessment API Response Types ──────────────────────────────
 
 
+class GroupingBasisItem(BaseModel):
+    disease: str = Field(default="", description="疾病名称，如 高血压")
+    type: str = Field(default="", description="疾病分类，如 一级高血压")
+    level: str = Field(default="", description="风险分层，如 低危")
+    note: str = Field(default="", description="提示文本，如 一级高血压低危")
+
+
 class PopulationClassification(BaseModel):
-    category: str = Field(..., description="健康 | 亚健康 | 慢病 | 专病")
-    label: str = Field(..., description="Human-readable label")
-    basis: list[str] = Field(default_factory=list, description="Classification criteria")
+    primary_category: str = Field(..., description="健康 | 亚健康 | 慢病 | 重症")
+    grouping_basis: list[GroupingBasisItem] = Field(default_factory=list, description="分组依据")
 
 
 class DataCollectionRecommendation(BaseModel):
@@ -240,6 +246,17 @@ class AbnormalIndicator(BaseModel):
     reference_range: str = Field(default="", description="Normal range")
     severity: str = Field(default="", description="Severity level")
     clinical_note: str = Field(default="", description="Clinical interpretation")
+
+
+class AbnormalWarning(BaseModel):
+    title: str = Field(..., description="Warning title")
+    tip: str = Field(..., description="Warm tip (≤20 chars)")
+    indicator_indices: list[int] = Field(..., description="Indices of related indicators")
+
+
+class AbnormalIndicatorsSection(BaseModel):
+    indicators: list[AbnormalIndicator] = Field(default_factory=list, description="Abnormal indicator items")
+    warnings: list[AbnormalWarning] = Field(default_factory=list, description="Warning groups linked to indicators")
 
 
 class DiseasePrediction(BaseModel):
@@ -262,9 +279,10 @@ class InterventionPrescription(BaseModel):
 class AssessmentResult(BaseModel):
     population_classification: PopulationClassification | None = None
     recommended_data_collection: list[DataCollectionRecommendation] = Field(default_factory=list)
-    abnormal_indicators: list[AbnormalIndicator] = Field(default_factory=list)
+    abnormal_indicators: Any = Field(default_factory=dict, description="Abnormal indicators section: {indicators: [...], warnings: [...]}")
     disease_prediction: list[DiseasePrediction] = Field(default_factory=list)
     intervention_prescriptions: list[InterventionPrescription] = Field(default_factory=list)
+    risk_warnings: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AssessmentMetadata(BaseModel):
@@ -347,6 +365,7 @@ class StreamingChatEndChunk(StreamingChatChunk):
     skill_result: dict | None = None
     multi_skill_selection: dict | None = None
     multi_skill_result: dict | None = None
+    structured_result: dict | None = Field(None, description="Full structured assessment result (same format as Assessment API)")
 
 
 class StreamingChatErrorChunk(StreamingChatChunk):
@@ -466,7 +485,7 @@ class InsightResponse(BaseModel):
         "party_id": "P001",
         "skill_name": "cvd-risk-assessment",
         "risk_level": "高危",
-        "population_classification": {"category": "专病", "label": "高危", "basis": []},
+        "population_classification": {"category": "重症", "label": "高危", "basis": []},
         "abnormal_indicators": [],
         "recommended_data_collection": [],
         "disease_prediction": [],

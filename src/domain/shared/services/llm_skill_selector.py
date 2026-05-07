@@ -500,9 +500,13 @@ class ClaudeSkillsExecutor:
                 return False
 
             # Check if SKILL.md contains workflow steps (### 步骤N: patterns)
+            # or has a tools: section with script references
             content = skill_md.read_text(encoding='utf-8')
             import re
             has_workflow = bool(re.search(r'### 步骤\d+[:：]', content))
+            if not has_workflow:
+                # Also treat skills with tools: - script: as workflow skills
+                has_workflow = bool(re.search(r'tools:\s*\n\s+-\s+script:', content))
             logger.info(f"Skill {skill_name} has workflow: {has_workflow}")
             return has_workflow
         except Exception as e:
@@ -552,6 +556,13 @@ class ClaudeSkillsExecutor:
             # Process result
             if result.get("success"):
                 final_output = result.get("final_output", {})
+                # Extract structured_result before unwrapping (script puts it
+                # alongside final_output, and the unwrap below discards it).
+                raw_structured_result = (
+                    result.get("structured_result")
+                    or (isinstance(final_output, dict) and final_output.get("structured_result"))
+                    or None
+                )
                 if isinstance(final_output, dict):
                     # Unwrap nested final_output (skill_md_executor wraps step output)
                     if "final_output" in final_output and isinstance(final_output["final_output"], dict):
@@ -577,8 +588,8 @@ class ClaudeSkillsExecutor:
                     if isinstance(data, dict) and "modules" in data:
                         response = self._format_modules_response(data)
                         structured = dict(data)
-                        if result.get("structured_result"):
-                            structured["structured_result"] = result["structured_result"]
+                        if raw_structured_result:
+                            structured["structured_result"] = raw_structured_result
                         return {
                             "success": True,
                             "skill_name": skill_name,
@@ -591,8 +602,8 @@ class ClaudeSkillsExecutor:
                     if "modules" in final_output:
                         response = self._format_modules_response(final_output)
                         structured = dict(final_output)
-                        if result.get("structured_result"):
-                            structured["structured_result"] = result["structured_result"]
+                        if raw_structured_result:
+                            structured["structured_result"] = raw_structured_result
                         return {
                             "success": True,
                             "skill_name": skill_name,

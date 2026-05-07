@@ -260,11 +260,53 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     category = _map_risk_to_category(risk_grade)
 
     # 1. Population classification
+    primary = "健康"
+    if "高危" in risk_grade or "很高危" in risk_grade:
+        primary = "重症"
+    elif "中危" in risk_grade or "中" in risk_grade:
+        primary = "慢病"
+    elif "低" in risk_grade:
+        primary = "亚健康"
+
+    # Grouping basis
+    disease_risks = []
+    ua = risk_data.get('uric_acid')
+    if ua:
+        try:
+            uv = float(ua)
+            if uv >= 600:
+                disease_risks.append("重度高尿酸血症")
+            elif uv >= 480:
+                disease_risks.append("高尿酸血症")
+            elif uv >= 420:
+                disease_risks.append("高尿酸血症（临界）")
+        except (ValueError, TypeError):
+            pass
+    if risk_data.get('has_gout'):
+        disease_risks.append("痛风")
+
+    disease_staging = ""
+    if ua:
+        try:
+            uv = float(ua)
+            if uv >= 600:
+                disease_staging = "重度高尿酸血症"
+            elif uv >= 480:
+                disease_staging = "高尿酸血症"
+            elif uv >= 420:
+                disease_staging = "高尿酸血症（临界）"
+        except (ValueError, TypeError):
+            pass
+
+    disease_name = "痛风" if risk_data.get('has_gout') else "高尿酸"
     population_classification = {
-        "categories": [{"category": category, "label": risk_grade or category}],
-        "primary_category": category,
-        "basis": [],
-        "score": 0,
+        "primary_category": primary,
+        "grouping_basis": [{
+            "disease": disease_name,
+            "type": disease_staging or "",
+            "level": risk_grade or "",
+            "note": f"{disease_staging}{risk_grade or ''}" if disease_staging else (risk_grade or ""),
+        }],
     }
 
     # 2. Recommended data collection (check for missing vitals)
@@ -307,21 +349,36 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     if is_elevated:
         prescriptions.append({"type": "饮水", "content": ["每日饮水2000ml以上，促进尿酸排泄"], "priority": "高"})
 
+    # Risk warnings
+    risk_warnings = []
+    if ua:
+        try:
+            uv = float(ua)
+            if uv >= 480:
+                risk_warnings.append({"title": "尿酸严重偏高", "description": f"血尿酸{ua}μmol/L，痛风风险显著增加", "level": "high"})
+            elif uv >= 420:
+                risk_warnings.append({"title": "尿酸偏高", "description": f"血尿酸{ua}μmol/L，需关注饮食控制", "level": "medium"})
+        except (ValueError, TypeError):
+            pass
+    if risk_data.get('has_gout'):
+        risk_warnings.append({"title": "痛风风险", "description": "已存在痛风症状，需控制尿酸水平预防发作", "level": "high"})
+
     return {
         "population_classification": population_classification,
         "recommended_data_collection": recommended,
         "abnormal_indicators": abnormal,
         "disease_prediction": disease_prediction,
         "intervention_prescriptions": prescriptions,
+        "risk_warnings": risk_warnings,
     }
 
 
 def _map_risk_to_category(risk_grade):
     if not risk_grade:
-        return "未知"
+        return "健康"
     grade = risk_grade.lower()
     if "很高危" in grade or "极高" in grade:
-        return "专病"
+        return "重症"
     if "高危" in grade or "高" in grade:
         return "慢病"
     if "中危" in grade or "中" in grade:

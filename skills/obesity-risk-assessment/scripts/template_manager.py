@@ -385,11 +385,58 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     category = _map_risk_to_category(risk_grade)
 
     # 1. Population classification
+    primary = "健康"
+    if "高危" in risk_grade or "很高危" in risk_grade:
+        primary = "重症"
+    elif "中危" in risk_grade or "中" in risk_grade:
+        primary = "慢病"
+    elif "低" in risk_grade:
+        primary = "亚健康"
+
+    # Grouping basis
+    disease_risks = []
+    bmi = risk_data.get('bmi')
+    waist = risk_data.get('waist_circumference')
+    if bmi:
+        try:
+            bv = float(bmi)
+            if bv >= 32:
+                disease_risks.append("重度肥胖")
+            elif bv >= 28:
+                disease_risks.append("肥胖")
+            elif bv >= 24:
+                disease_risks.append("超重")
+        except (ValueError, TypeError):
+            pass
+    if waist:
+        try:
+            wv = float(waist)
+            if wv >= 90:
+                disease_risks.append("中心性肥胖")
+        except (ValueError, TypeError):
+            pass
+
+    disease_staging = ""
+    if bmi:
+        try:
+            bv = float(bmi)
+            if bv >= 32:
+                disease_staging = "重度肥胖"
+            elif bv >= 28:
+                disease_staging = "肥胖"
+            elif bv >= 24:
+                disease_staging = "超重"
+        except (ValueError, TypeError):
+            pass
+
     population_classification = {
-        "categories": [{"category": category, "label": risk_grade or category}],
-        "primary_category": category,
-        "basis": [],
-        "score": 0,
+        "primary_category": primary,
+        "grouping_basis": [{
+            "disease": "肥胖",
+            "type": disease_staging or "",
+            "level": risk_grade or "",
+            "note": f"{disease_staging}{risk_grade or ''}" if disease_staging else (risk_grade or ""),
+        }],
     }
 
     # 2. Recommended data collection (check for missing vitals)
@@ -449,21 +496,36 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     if risk_level in ('高风险',):
         prescriptions.append({"type": "体重管理", "content": ["建议在医生指导下进行系统体重管理"], "priority": "高"})
 
+    # Risk warnings
+    risk_warnings = []
+    if bmi:
+        try:
+            bv = float(bmi)
+            if bv >= 32:
+                risk_warnings.append({"title": "重度肥胖", "description": f"BMI {bmi}，属于重度肥胖，需医学干预", "level": "high"})
+            elif bv >= 28:
+                risk_warnings.append({"title": "肥胖预警", "description": f"BMI {bmi}，属于肥胖，建议减重", "level": "medium"})
+            elif bv >= 24:
+                risk_warnings.append({"title": "超重提醒", "description": f"BMI {bmi}，属于超重，建议控制体重", "level": "low"})
+        except (ValueError, TypeError):
+            pass
+
     return {
         "population_classification": population_classification,
         "recommended_data_collection": recommended,
         "abnormal_indicators": abnormal,
         "disease_prediction": disease_prediction,
         "intervention_prescriptions": prescriptions,
+        "risk_warnings": risk_warnings,
     }
 
 
 def _map_risk_to_category(risk_grade):
     if not risk_grade:
-        return "未知"
+        return "健康"
     grade = risk_grade.lower()
     if "很高危" in grade or "极高" in grade:
-        return "专病"
+        return "重症"
     if "高危" in grade or "高" in grade:
         return "慢病"
     if "中危" in grade or "中" in grade:

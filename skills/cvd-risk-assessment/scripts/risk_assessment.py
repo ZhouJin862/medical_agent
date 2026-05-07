@@ -561,12 +561,58 @@ class CVDAssessmentExecutor:
                                   category_zh: str, factors: list) -> Dict[str, Any]:
         """Build structured result conforming to the unified assessment JSON schema."""
         # Population classification
-        category = "专病" if "高危" in category_zh else "慢病" if "中危" in category_zh else "亚健康" if "低" in category_zh else "健康"
+        primary = "健康"
+        if "很高危" in category_zh or "高危" in category_zh:
+            primary = "重症"
+        elif "中危" in category_zh or "中" in category_zh:
+            primary = "慢病"
+        elif "低" in category_zh:
+            primary = "亚健康"
+
+        # Grouping basis - collect per-disease info
+        disease_risks = []
+        disease_staging = ""
+        level = category_zh or ""
+
+        # Disease risks from abnormal indicators
+        if patient.sbp:
+            if patient.sbp >= 180:
+                disease_risks.append("3级高血压")
+            elif patient.sbp >= 160:
+                disease_risks.append("2级高血压")
+            elif patient.sbp >= 140:
+                disease_risks.append("1级高血压")
+            elif patient.sbp >= 130:
+                disease_risks.append("正常高值血压")
+        if patient.tc and patient.tc >= 5.2:
+            disease_risks.append("高胆固醇血症")
+        if patient.ldl_c and patient.ldl_c >= 3.4:
+            disease_risks.append("高低密度脂蛋白")
+        if patient.bmi and patient.bmi >= 28:
+            disease_risks.append("肥胖")
+        elif patient.bmi and patient.bmi >= 24:
+            disease_risks.append("超重")
+
+        # Disease staging from blood pressure
+        if patient.sbp and patient.sbp >= 180:
+            disease_staging = "3级高血压"
+        elif patient.sbp and patient.sbp >= 160:
+            disease_staging = "2级高血压"
+        elif patient.sbp and patient.sbp >= 140:
+            disease_staging = "1级高血压"
+        elif patient.sbp and patient.sbp >= 130:
+            disease_staging = "正常高值"
+
+        grouping_basis = [{
+            "disease": "心血管病",
+            "type": disease_staging or "",
+            "level": level,
+            "note": f"{disease_staging}{level}" if disease_staging else level or "",
+        }]
+
         population = {
-            "categories": [{"category": category, "label": category_zh}],
-            "primary_category": category,
-            "basis": factors if factors else [],
-            "score": 0,
+            "primary_category": primary,
+            "grouping_basis": grouping_basis,
         }
 
         # Recommended data collection
@@ -590,26 +636,34 @@ class CVDAssessmentExecutor:
                 else:
                     _seen_labels.add(label)
 
-        # Abnormal indicators
+        # Abnormal indicators (with summary)
         abnormal = []
         if patient.sbp and patient.sbp >= 140:
+            stage = "2级" if patient.sbp >= 160 else "1级"
             abnormal.append({"name": "收缩压", "value": patient.sbp, "unit": "mmHg",
-                             "reference": "<140 mmHg", "severity": "high"})
+                             "reference": "<140 mmHg", "severity": "high",
+                             "summary": f"收缩压{patient.sbp}，{stage}高血压"})
         if patient.dbp and patient.dbp >= 90:
             abnormal.append({"name": "舒张压", "value": patient.dbp, "unit": "mmHg",
-                             "reference": "<90 mmHg", "severity": "high"})
+                             "reference": "<90 mmHg", "severity": "high",
+                             "summary": f"舒张压{patient.dbp}，偏高"})
         if patient.tc and patient.tc >= 5.2:
             abnormal.append({"name": "总胆固醇", "value": patient.tc, "unit": "mmol/L",
-                             "reference": "<5.2 mmol/L", "severity": "elevated"})
+                             "reference": "<5.2 mmol/L", "severity": "elevated",
+                             "summary": f"总胆固醇{patient.tc}，偏高"})
         if patient.ldl_c and patient.ldl_c >= 3.4:
             abnormal.append({"name": "低密度脂蛋白", "value": patient.ldl_c, "unit": "mmol/L",
-                             "reference": "<3.4 mmol/L", "severity": "elevated"})
+                             "reference": "<3.4 mmol/L", "severity": "elevated",
+                             "summary": f"LDL-C {patient.ldl_c}，偏高"})
         if patient.hdl_c and patient.hdl_c < 1.0:
             abnormal.append({"name": "高密度脂蛋白", "value": patient.hdl_c, "unit": "mmol/L",
-                             "reference": "≥1.0 mmol/L", "severity": "low"})
+                             "reference": "≥1.0 mmol/L", "severity": "low",
+                             "summary": f"HDL-C {patient.hdl_c}，偏低"})
         if patient.bmi and patient.bmi >= 24:
+            label = "肥胖" if patient.bmi >= 28 else "超重"
             abnormal.append({"name": "BMI", "value": patient.bmi, "unit": "kg/m²",
-                             "reference": "18.5-23.9", "severity": "elevated"})
+                             "reference": "18.5-23.9", "severity": "elevated",
+                             "summary": f"BMI {patient.bmi}，{label}"})
 
         # Disease prediction
         disease_prediction = []
@@ -632,18 +686,78 @@ class CVDAssessmentExecutor:
                 "risk_model": "China-PAR",
             })
 
-        # Intervention prescriptions
-        prescriptions = [
-            {"type": "diet", "title": "饮食处方",
-             "content": ["低盐低脂饮食，增加蔬菜水果摄入", "限制钠盐<6g/天", "减少高脂高糖食物"],
-             "priority": "high"},
-            {"type": "exercise", "title": "运动处方",
-             "content": ["每周150分钟中等强度有氧运动（快走、游泳等）", "避免久坐，每次运动不少于30分钟"],
-             "priority": "high"},
-            {"type": "sleep", "title": "睡眠处方",
+        # Intervention prescriptions (personalized based on abnormal indicators)
+        prescriptions = []
+
+        # Diet
+        diet_items = ["低盐低脂饮食，增加蔬菜水果摄入", "限制钠盐<6g/天"]
+        if patient.tc and patient.tc >= 5.2:
+            diet_items.append(f"总胆固醇{patient.tc}偏高，减少动物内脏、蛋黄等高胆固醇食物")
+        if patient.ldl_c and patient.ldl_c >= 3.4:
+            diet_items.append(f"LDL-C {patient.ldl_c}偏高，限制饱和脂肪摄入，选择植物油")
+        if patient.tg and patient.tg >= 1.7:
+            diet_items.append(f"甘油三酯{patient.tg}偏高，减少精制碳水和酒精摄入")
+        if patient.bmi and patient.bmi >= 24:
+            label = "肥胖" if patient.bmi >= 28 else "超重"
+            diet_items.append(f"BMI {patient.bmi}（{label}），控制每日总热量摄入")
+        prescriptions.append({"type": "diet", "title": "饮食处方", "content": diet_items, "priority": "high"})
+
+        # Exercise
+        exercise_items = ["每周150分钟中等强度有氧运动（快走、游泳等）", "避免久坐，每次运动不少于30分钟"]
+        if patient.sbp and patient.sbp >= 160:
+            exercise_items.append("血压较高，避免剧烈运动和憋气动作，建议先从散步开始")
+        prescriptions.append({"type": "exercise", "title": "运动处方", "content": exercise_items, "priority": "high"})
+
+        # Sleep
+        prescriptions.append({"type": "sleep", "title": "睡眠处方",
              "content": ["保持每日7-8小时规律睡眠", "避免熬夜"],
-             "priority": "medium"},
-        ]
+             "priority": "medium"})
+
+        # Monitoring
+        monitor_items = []
+        if patient.sbp and patient.sbp >= 130:
+            monitor_items.append("每日早晚各测一次血压并记录")
+        if patient.tc and patient.tc >= 5.2:
+            monitor_items.append("每3-6个月复查血脂四项")
+        if patient.bmi and patient.bmi >= 24:
+            monitor_items.append("每周测量体重，记录变化趋势")
+        if monitor_items:
+            prescriptions.append({"type": "monitoring", "title": "监测处方", "content": monitor_items, "priority": "medium"})
+
+        # Medication (only for high risk)
+        if primary in ("慢病", "重症") and patient.sbp and patient.sbp >= 140:
+            prescriptions.append({"type": "medication", "title": "用药建议",
+                 "content": [f"血压{patient.sbp}/{patient.dbp}mmHg未达标，建议在医生指导下规范降压治疗", "定期复查，根据医嘱调整用药方案"],
+                 "priority": "high"})
+
+        # Risk warnings
+        risk_warnings = []
+        if result.ten_year_risk:
+            cat = self._get_category_zh_by_value(result.ten_year_risk)
+            if "高" in cat or "很高" in cat:
+                risk_warnings.append({
+                    "title": "心血管事件风险偏高",
+                    "description": f"10年心血管病风险为{result.ten_year_risk_range or '偏高'}，属于{cat}，建议积极控制血压血脂",
+                    "level": "high",
+                })
+            elif "中" in cat:
+                risk_warnings.append({
+                    "title": "心血管风险需关注",
+                    "description": f"10年心血管病风险为{result.ten_year_risk_range or '中等'}，属于{cat}，建议加强血压和血脂管理",
+                    "level": "medium",
+                })
+        if patient.sbp and patient.sbp >= 160:
+            risk_warnings.append({
+                "title": "血压严重偏高",
+                "description": f"收缩压{patient.sbp}mmHg，已达{disease_staging}，需尽快就医调整方案",
+                "level": "high",
+            })
+        elif patient.sbp and patient.sbp >= 140:
+            risk_warnings.append({
+                "title": "血压未达标",
+                "description": f"收缩压{patient.sbp}mmHg，建议调整生活方式或用药",
+                "level": "medium",
+            })
 
         return {
             "population_classification": population,
@@ -651,6 +765,7 @@ class CVDAssessmentExecutor:
             "abnormal_indicators": abnormal,
             "disease_prediction": disease_prediction,
             "intervention_prescriptions": prescriptions,
+            "risk_warnings": risk_warnings,
         }
 
     def _generate_health_insight(self, result: RiskAssessmentResult, patient: PatientData) -> str:

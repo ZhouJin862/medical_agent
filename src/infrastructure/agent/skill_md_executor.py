@@ -93,6 +93,10 @@ class SkillWorkflowParser:
                     args=parsed['args']
                 ))
 
+        # Fallback: parse tools from YAML frontmatter if no ### 步骤N: found
+        if not steps:
+            steps = self._parse_frontmatter_tools()
+
         return sorted(steps, key=lambda x: x.step_number)
 
     def _parse_command(self, command: str, step_num: int) -> Optional[Dict]:
@@ -126,6 +130,50 @@ class SkillWorkflowParser:
             'script': Path(script_rel_path),
             'args': args
         }
+
+    def _parse_frontmatter_tools(self) -> List[ExecutionStep]:
+        """Parse execution steps from YAML frontmatter tools: section.
+
+        Supports format like:
+            tools:
+              - script: scripts/population_classifier.py
+                args: ["--input", "$input", "--mode", "skill"]
+        """
+        frontmatter = self.parse_frontmatter()
+        tools = frontmatter.get('tools', [])
+        if not isinstance(tools, list):
+            return []
+
+        steps = []
+        for i, tool in enumerate(tools):
+            if not isinstance(tool, dict):
+                continue
+            script = tool.get('script')
+            if not script:
+                continue
+
+            # Remove scripts/ prefix (execute_step auto-adds it)
+            script_str = str(script)
+            if script_str.startswith('scripts/'):
+                script_str = script_str[8:]
+
+            args = tool.get('args', [])
+            if isinstance(args, str):
+                import shlex
+                try:
+                    args = shlex.split(args)
+                except Exception:
+                    args = args.split()
+
+            steps.append(ExecutionStep(
+                step_number=i + 1,
+                title=Path(script_str).stem,
+                command=f"python scripts/{script}",
+                script_path=Path(script_str),
+                args=args if isinstance(args, list) else [],
+            ))
+
+        return steps
 
     def get_skill_info(self) -> Dict[str, Any]:
         """获取技能信息"""

@@ -363,11 +363,69 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     category = _map_risk_to_category(risk_grade)
 
     # 1. Population classification
+    primary = "健康"
+    if "高危" in risk_grade or "很高危" in risk_grade:
+        primary = "重症"
+    elif "中危" in risk_grade or "中" in risk_grade:
+        primary = "慢病"
+    elif "低" in risk_grade:
+        primary = "亚健康"
+
+    # Grouping basis
+    disease_risks = []
+    tc = risk_data.get('tc')
+    tg = risk_data.get('tg')
+    ldl = risk_data.get('ldl_c')
+    hdl = risk_data.get('hdl_c')
+    if tc:
+        try:
+            if float(tc) >= 6.2:
+                disease_risks.append("高胆固醇血症")
+            elif float(tc) >= 5.2:
+                disease_risks.append("边缘升高胆固醇")
+        except (ValueError, TypeError):
+            pass
+    if tg:
+        try:
+            if float(tg) >= 2.3:
+                disease_risks.append("高甘油三酯血症")
+            elif float(tg) >= 1.7:
+                disease_risks.append("边缘升高甘油三酯")
+        except (ValueError, TypeError):
+            pass
+    if ldl:
+        try:
+            if float(ldl) >= 4.1:
+                disease_risks.append("高低密度脂蛋白血症")
+            elif float(ldl) >= 3.4:
+                disease_risks.append("边缘升高低密度脂蛋白")
+        except (ValueError, TypeError):
+            pass
+    if hdl:
+        try:
+            if float(hdl) < 1.0:
+                disease_risks.append("低高密度脂蛋白血症")
+        except (ValueError, TypeError):
+            pass
+
+    disease_staging = ""
+    if tc:
+        try:
+            if float(tc) >= 6.2:
+                disease_staging = "高胆固醇血症"
+            elif float(tc) >= 5.2:
+                disease_staging = "边缘升高"
+        except (ValueError, TypeError):
+            pass
+
     population_classification = {
-        "categories": [{"category": category, "label": risk_grade or category}],
-        "primary_category": category,
-        "basis": [],
-        "score": 0,
+        "primary_category": primary,
+        "grouping_basis": [{
+            "disease": "高血脂",
+            "type": disease_staging or "",
+            "level": risk_grade or "",
+            "note": f"{disease_staging}{risk_grade or ''}" if disease_staging else (risk_grade or ""),
+        }],
     }
 
     # 2. Recommended data collection (check for missing vitals)
@@ -434,21 +492,33 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     if risk_tier in ('极高危', '高危'):
         prescriptions.append({"type": "药物治疗", "content": ["建议在医生指导下进行降脂药物治疗"], "priority": "高"})
 
+    # Risk warnings
+    risk_warnings = []
+    if tc:
+        try:
+            if float(tc) >= 6.2:
+                risk_warnings.append({"title": "胆固醇严重偏高", "description": f"总胆固醇{tc}mmol/L，提示高胆固醇血症", "level": "high"})
+            elif float(tc) >= 5.2:
+                risk_warnings.append({"title": "胆固醇偏高", "description": f"总胆固醇{tc}mmol/L，边缘升高", "level": "medium"})
+        except (ValueError, TypeError):
+            pass
+
     return {
         "population_classification": population_classification,
         "recommended_data_collection": recommended,
         "abnormal_indicators": abnormal,
         "disease_prediction": disease_prediction,
         "intervention_prescriptions": prescriptions,
+        "risk_warnings": risk_warnings,
     }
 
 
 def _map_risk_to_category(risk_grade):
     if not risk_grade:
-        return "未知"
+        return "健康"
     grade = risk_grade.lower()
     if "很高危" in grade or "极高" in grade:
-        return "专病"
+        return "重症"
     if "高危" in grade or "高" in grade:
         return "慢病"
     if "中危" in grade or "中" in grade:

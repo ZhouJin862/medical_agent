@@ -361,11 +361,62 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     category = _map_risk_to_category(risk_grade)
 
     # 1. Population classification
+    primary = "健康"
+    if "高危" in risk_grade or "很高危" in risk_grade:
+        primary = "重症"
+    elif "中危" in risk_grade or "中" in risk_grade:
+        primary = "慢病"
+    elif "低" in risk_grade:
+        primary = "亚健康"
+
+    # Grouping basis
+    disease_risks = []
+    fg = risk_data.get('fasting_glucose')
+    hba1c = risk_data.get('hba1c')
+    if fg:
+        try:
+            fv = float(fg)
+            if fv >= 11.1:
+                disease_risks.append("糖尿病")
+            elif fv >= 7.0:
+                disease_risks.append("糖尿病（未控制）")
+            elif fv >= 6.1:
+                disease_risks.append("空腹血糖受损")
+        except (ValueError, TypeError):
+            pass
+    if hba1c:
+        try:
+            hv = float(hba1c)
+            if hv >= 9.0:
+                disease_risks.append("糖化血红蛋白控制极差")
+            elif hv >= 7.0:
+                disease_risks.append("糖化血红蛋白偏高")
+            elif hv >= 6.5:
+                disease_risks.append("糖化血红蛋白临界")
+        except (ValueError, TypeError):
+            pass
+
+    disease_staging = ""
+    if fg:
+        try:
+            fv = float(fg)
+            if fv >= 11.1:
+                disease_staging = "显性糖尿病"
+            elif fv >= 7.0:
+                disease_staging = "糖尿病"
+            elif fv >= 6.1:
+                disease_staging = "糖尿病前期"
+        except (ValueError, TypeError):
+            pass
+
     population_classification = {
-        "categories": [{"category": category, "label": risk_grade or category}],
-        "primary_category": category,
-        "basis": [],
-        "score": 0,
+        "primary_category": primary,
+        "grouping_basis": [{
+            "disease": "糖尿病",
+            "type": disease_staging or "",
+            "level": risk_grade or "",
+            "note": f"{disease_staging}{risk_grade or ''}" if disease_staging else (risk_grade or ""),
+        }],
     }
 
     # 2. Recommended data collection (check for missing vitals)
@@ -419,21 +470,34 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
     if risk_level in ('高风险',):
         prescriptions.append({"type": "药物治疗", "content": ["建议在医生指导下进行降糖治疗"], "priority": "高"})
 
+    # Risk warnings
+    risk_warnings = []
+    if fg:
+        try:
+            fv = float(fg)
+            if fv >= 11.1:
+                risk_warnings.append({"title": "血糖严重偏高", "description": f"空腹血糖{fg}mmol/L，提示显性糖尿病，需积极治疗", "level": "high"})
+            elif fv >= 7.0:
+                risk_warnings.append({"title": "血糖偏高", "description": f"空腹血糖{fg}mmol/L，提示糖尿病，建议规范治疗", "level": "medium"})
+        except (ValueError, TypeError):
+            pass
+
     return {
         "population_classification": population_classification,
         "recommended_data_collection": recommended,
         "abnormal_indicators": abnormal,
         "disease_prediction": disease_prediction,
         "intervention_prescriptions": prescriptions,
+        "risk_warnings": risk_warnings,
     }
 
 
 def _map_risk_to_category(risk_grade):
     if not risk_grade:
-        return "未知"
+        return "健康"
     grade = risk_grade.lower()
     if "很高危" in grade or "极高" in grade:
-        return "专病"
+        return "重症"
     if "高危" in grade or "高" in grade:
         return "慢病"
     if "中危" in grade or "中" in grade:

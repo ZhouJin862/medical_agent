@@ -129,6 +129,42 @@ python scripts/template_manager.py --template report --render --format modules
 
 ---
 
+## 改善建议生成规则
+
+根据评估结果生成个性化改善建议，输出 JSON 数组，每项格式：
+```json
+{"type": "diet|exercise|sleep|monitoring|medication", "title": "处方标题", "content": ["建议1", "建议2"], "priority": "high|medium|low"}
+```
+
+### 生成规则
+
+1. **饮食处方** (type: diet)
+   - TC偏高 → 减少胆固醇摄入（动物内脏、蛋黄等）
+   - TG偏高 → 减少精制糖和酒精摄入，增加Omega-3脂肪酸
+   - LDL-C偏高 → 限制饱和脂肪（红肉、黄油），选择植物油
+   - HDL-C偏低 → 增加不饱和脂肪（坚果、鱼类），适量运动
+
+2. **运动处方** (type: exercise)
+   - 中等强度有氧运动（快走、游泳、骑车），每周150分钟
+   - 有助于降低TG、升高HDL-C
+   - 肥胖者增加至每周300分钟
+
+3. **睡眠处方** (type: sleep)
+   - 保证7-8小时规律睡眠
+   - 睡眠不足可影响脂代谢
+
+4. **监测处方** (type: monitoring)
+   - 边缘升高 → 每年复查血脂四项
+   - 血脂异常 → 每3-6个月复查血脂+肝功能
+   - 服药期间 → 每3个月复查血脂+肝功能+CK
+   - 极高危 → 每1-3个月复查
+
+5. **药物处方** (type: medication)
+   - LDL-C ≥4.9 → 建议他汀类药物治疗
+   - 极高危/高危 → 考虑中等强度他汀
+   - TG ≥5.6 → 先降TG防急性胰腺炎（贝特类）
+   - 所有药物建议附"请在医生指导下使用"提示
+
 ## 注意事项
 
 - 血脂检测需空腹12小时

@@ -12,9 +12,13 @@
 
 import json
 import sys
+import os
 import argparse
 from datetime import datetime
 from typing import Dict, Any, List, Tuple, Optional
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'shared'))
+from data_format_adapter import adapt_agent_format
 
 
 class HealthDataValidator:
@@ -118,7 +122,8 @@ class HealthDataValidator:
         except json.JSONDecodeError as e:
             self.errors.append(f"JSON格式错误: {str(e)}")
             return False, {}
-        
+
+        data = adapt_agent_format(data)
         return self.validate_data(data)
     
     def validate_data(self, data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
@@ -195,60 +200,64 @@ class HealthDataValidator:
         return len(self.errors) == 0
     
     def _validate_health_metrics(self, data: Dict[str, Any]) -> bool:
-        """验证健康指标数据"""
+        """验证健康指标数据
+
+        Missing indicators are recorded as warnings (not errors) so that
+        partial data still produces a valid assessment.
+        """
         if 'health_metrics' not in data:
             self.errors.append("缺少健康指标数据(health_metrics)")
             return False
-        
+
         metrics = data['health_metrics']
-        
+
         # 验证血压
         if 'blood_pressure' in metrics:
             bp = metrics['blood_pressure']
-            if not self._validate_dict_fields(bp, ['systolic', 'diastolic'], '血压'):
-                pass
-            else:
-                self._check_range(bp['systolic'], 'systolic', '血压-收缩压')
-                self._check_range(bp['diastolic'], 'diastolic', '血压-舒张压')
+            for f in ['systolic', 'diastolic']:
+                if f in bp:
+                    self._check_range(bp[f], f, f'血压-{f}')
+                else:
+                    self.warnings.append(f"血压缺少字段: {f}")
         else:
-            self.errors.append("缺少血压数据(blood_pressure)")
-        
+            self.warnings.append("缺少血压数据(blood_pressure)，评估可能不完整")
+
         # 验证血糖
         if 'blood_glucose' in metrics:
             bg = metrics['blood_glucose']
-            if 'fasting' not in bg:
-                self.errors.append("缺少空腹血糖数据(fasting)")
-            else:
+            if 'fasting' in bg:
                 self._check_range(bg['fasting'], 'fasting', '空腹血糖')
-                if 'postprandial' in bg:
-                    self._check_range(bg['postprandial'], 'postprandial', '餐后血糖')
+            else:
+                self.warnings.append("缺少空腹血糖数据(fasting)")
+            if 'postprandial' in bg:
+                self._check_range(bg['postprandial'], 'postprandial', '餐后血糖')
         else:
-            self.errors.append("缺少血糖数据(blood_glucose)")
-        
+            self.warnings.append("缺少血糖数据(blood_glucose)，评估可能不完整")
+
         # 验证血脂
         if 'blood_lipid' in metrics:
             lipid = metrics['blood_lipid']
-            required_lipid = ['tc', 'tg', 'ldl_c', 'hdl_c']
-            if self._validate_dict_fields(lipid, required_lipid, '血脂'):
-                for field in required_lipid:
+            for field in ['tc', 'tg', 'ldl_c', 'hdl_c']:
+                if field in lipid:
                     self._check_range(lipid[field], field, f'血脂-{field}')
+                else:
+                    self.warnings.append(f"血脂缺少字段: {field}")
         else:
-            self.errors.append("缺少血脂数据(blood_lipid)")
-        
+            self.warnings.append("缺少血脂数据(blood_lipid)，评估可能不完整")
+
         # 验证尿酸
         if 'uric_acid' in metrics:
             ua = metrics['uric_acid']
             gender = data.get('patient_info', {}).get('gender', 'male')
-            gender_key = 'male' if gender in ['male', '男'] else 'female'
+            gender_key = 'male' if gender in ['male', '男', 'F', 'f'] else 'female'
             range_key = gender_key
             self._check_uric_acid(ua, range_key)
         else:
-            self.errors.append("缺少尿酸数据(uric_acid)")
-        
+            self.warnings.append("缺少尿酸数据(uric_acid)，评估可能不完整")
+
         # 验证BMI
         if 'bmi' in metrics:
             bmi_data = metrics['bmi']
-            # 支持三种格式：数值、字典{value}、字典{height, weight}
             if isinstance(bmi_data, dict):
                 if 'value' in bmi_data and bmi_data['value'] is not None:
                     bmi_val = bmi_data['value']
@@ -259,23 +268,23 @@ class HealthDataValidator:
                 else:
                     self.warnings.append("BMI数据不完整，缺少value或height/weight字段")
             elif isinstance(bmi_data, (int, float)):
-                # 直接提供BMI数值，验证合理性
                 if bmi_data < 10 or bmi_data > 50:
-                    self.errors.append(f"BMI值异常: {bmi_data}")
+                    self.warnings.append(f"BMI值异常: {bmi_data}")
             else:
-                self.errors.append(f"BMI数据格式错误: {type(bmi_data)}")
+                self.warnings.append(f"BMI数据格式异常: {type(bmi_data)}")
         else:
-            self.errors.append("缺少BMI数据(bmi)")
-        
+            self.warnings.append("缺少BMI数据(bmi)，评估可能不完整")
+
         return len(self.errors) == 0
-    
+
     def _validate_dict_fields(self, data: Dict, required: List[str], field_name: str) -> bool:
-        """验证字典字段完整性"""
+        """验证字典字段完整性（缺失字段记为 warning，不阻断评估）"""
+        all_present = True
         for field in required:
             if field not in data:
-                self.errors.append(f"{field_name}缺少字段: {field}")
-                return False
-        return True
+                self.warnings.append(f"{field_name}缺少字段: {field}")
+                all_present = False
+        return all_present
     
     def _check_range(self, value: float, range_key: str, field_name: str):
         """检查数值范围"""
@@ -337,46 +346,48 @@ class HealthDataValidator:
                 self.warnings.append(f"BMI值异常: {bmi:.2f} kg/m² (正常范围: 15-40 kg/m²)")
     
     def _standardize_data(self, data: Dict[str, Any]):
-        """标准化数据"""
+        """标准化数据（安全取值，跳过缺失字段）"""
         self.validated_data['health_metrics'] = {}
         metrics = data['health_metrics']
-        
+
         # 标准化血压
         if 'blood_pressure' in metrics:
-            self.validated_data['health_metrics']['blood_pressure'] = {
-                'systolic': float(metrics['blood_pressure']['systolic']),
-                'diastolic': float(metrics['blood_pressure']['diastolic'])
-            }
-        
+            bp = {k: float(v) for k, v in metrics['blood_pressure'].items()
+                  if k in ('systolic', 'diastolic') and v is not None}
+            if bp:
+                self.validated_data['health_metrics']['blood_pressure'] = bp
+
         # 标准化血糖
         if 'blood_glucose' in metrics:
-            bg_data = {
-                'fasting': float(metrics['blood_glucose']['fasting'])
-            }
-            if 'postprandial' in metrics['blood_glucose']:
-                bg_data['postprandial'] = float(metrics['blood_glucose']['postprandial'])
-            self.validated_data['health_metrics']['blood_glucose'] = bg_data
-        
+            bg = metrics['blood_glucose']
+            bg_data = {}
+            if 'fasting' in bg and bg['fasting'] is not None:
+                bg_data['fasting'] = float(bg['fasting'])
+            if 'postprandial' in bg and bg['postprandial'] is not None:
+                bg_data['postprandial'] = float(bg['postprandial'])
+            if 'hba1c' in bg and bg['hba1c'] is not None:
+                bg_data['hba1c'] = float(bg['hba1c'])
+            if bg_data:
+                self.validated_data['health_metrics']['blood_glucose'] = bg_data
+
         # 标准化血脂
         if 'blood_lipid' in metrics:
             lipid = metrics['blood_lipid']
-            self.validated_data['health_metrics']['blood_lipid'] = {
-                'tc': float(lipid['tc']),
-                'tg': float(lipid['tg']),
-                'ldl_c': float(lipid['ldl_c']),
-                'hdl_c': float(lipid['hdl_c'])
-            }
-        
+            lipid_data = {}
+            for key in ('tc', 'tg', 'ldl_c', 'hdl_c'):
+                if key in lipid and lipid[key] is not None:
+                    lipid_data[key] = float(lipid[key])
+            if lipid_data:
+                self.validated_data['health_metrics']['blood_lipid'] = lipid_data
+
         # 标准化尿酸
-        if 'uric_acid' in metrics:
+        if 'uric_acid' in metrics and metrics['uric_acid'] is not None:
             self.validated_data['health_metrics']['uric_acid'] = float(metrics['uric_acid'])
-        
+
         # 标准化BMI
         if 'bmi' in metrics:
             bmi_value = metrics['bmi']
-            # 支持三种格式：数值、字典{value}、字典{height, weight}
             if isinstance(bmi_value, dict):
-                # 优先使用已计算的 value
                 if 'value' in bmi_value and bmi_value['value'] is not None:
                     bmi_data = {'value': float(bmi_value['value'])}
                     if 'waist_circumference' in bmi_value:
@@ -387,8 +398,8 @@ class HealthDataValidator:
                         bmi_data['weight'] = float(bmi_value['weight'])
                     self.validated_data['health_metrics']['bmi'] = bmi_data
                 else:
-                    height = float(bmi_value.get('height', 0))
-                    weight = float(bmi_value.get('weight', 0))
+                    height = float(bmi_value.get('height', 0) or 0)
+                    weight = float(bmi_value.get('weight', 0) or 0)
                     if height > 0 and weight > 0:
                         bmi = weight / (height ** 2)
                         bmi_data = {
@@ -402,19 +413,11 @@ class HealthDataValidator:
                     else:
                         self.warnings.append("BMI数据不完整，缺少有效的value或height/weight")
             elif isinstance(bmi_value, (int, float)):
-                # 直接提供BMI数值
                 self.validated_data['health_metrics']['bmi'] = {
                     'value': float(bmi_value),
                     'height': None,
                     'weight': None
                 }
-            else:
-                self.errors.append(f"BMI数据格式错误: {type(bmi_value)}")
-        
-        # 标准化血糖时添加HbA1c（如有）
-        if 'blood_glucose' in self.validated_data['health_metrics']:
-            if 'hba1c' in metrics['blood_glucose']:
-                self.validated_data['health_metrics']['blood_glucose']['hba1c'] = float(metrics['blood_glucose']['hba1c'])
         
         # 保存额外数据（用于HE-Report增强评估）
         if 'additional_data' in data:

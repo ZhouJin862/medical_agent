@@ -10,6 +10,8 @@ import logging
 import re
 from typing import AsyncIterator, Optional, Dict, Any
 
+from src.interface.api.routes.assessment import _extract_structured_result, transform_abnormal_indicators
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
@@ -104,6 +106,189 @@ async def _get_health_data_from_pingan(party_id: str) -> Optional[Dict[str, Any]
         import traceback
         traceback.print_exc()
         return None
+
+
+def _build_health_report(sr: Dict[str, Any]) -> str:
+    """Build a formatted health assessment report from structured_result.
+
+    Generates a markdown report with all modules (population classification,
+    abnormal indicators, disease prediction, intervention prescriptions,
+    risk warnings) instead of returning raw JSON to the user.
+    """
+    lines = []
+
+    # --- Population Classification ---
+    pc = sr.get("population_classification", {})
+    category = pc.get("primary_category", "")
+    if category:
+        lines.append(f"## 健康人群分组：**{category}**")
+        basis_list = pc.get("grouping_basis", [])
+        if basis_list:
+            lines.append("")
+            lines.append("**分组依据：**")
+            for b in basis_list:
+                if isinstance(b, dict):
+                    disease = b.get("disease", "")
+                    note = b.get("note", "")
+                    disease_type = b.get("type", "")
+                    level = b.get("level", "")
+                    if note:
+                        detail = f"- {disease}：{note}"
+                    elif disease_type and level:
+                        detail = f"- {disease}：{disease_type}{level}"
+                    elif level:
+                        detail = f"- {disease}：{level}"
+                    else:
+                        detail = f"- {disease}"
+                    lines.append(detail)
+        lines.append("")
+
+    # --- Abnormal Indicators & Warnings ---
+    abn = sr.get("abnormal_indicators", [])
+
+    # Support both old flat list and new {indicators, warnings} structure
+    if isinstance(abn, dict):
+        indicators = abn.get("indicators", [])
+        warnings = abn.get("warnings", [])
+    elif isinstance(abn, list):
+        indicators = abn
+        warnings = []
+    else:
+        indicators = []
+        warnings = []
+
+    if indicators:
+        lines.append("## 异常指标")
+        lines.append("")
+        for a in indicators:
+            name = a.get("name", "")
+            value = a.get("value", "")
+            unit = a.get("unit", "")
+            ref = a.get("reference_range", a.get("reference", ""))
+            severity = a.get("severity", "")
+            line = f"- **{name}**：{value} {unit}"
+            if ref:
+                line += f"（参考范围：{ref}）"
+            if severity:
+                line += f" — {severity}"
+            lines.append(line)
+        lines.append("")
+
+    if warnings:
+        lines.append("## 异常预警")
+        lines.append("")
+        for w in warnings:
+            title = w.get("title", "")
+            tip = w.get("tip", "")
+            indices = w.get("indicator_indices", [])
+            # Show which indicators this warning relates to
+            related = []
+            for idx in indices:
+                if 0 <= idx < len(indicators):
+                    related.append(indicators[idx].get("name", ""))
+            line = f"- ⚠️ **{title}**"
+            if related:
+                line += f"（关联指标：{'、'.join(related)}）"
+            lines.append(line)
+            if tip:
+                lines.append(f"  > {tip}")
+        lines.append("")
+
+    # --- Disease Prediction ---
+    dp = sr.get("disease_prediction", [])
+    if dp:
+        lines.append("## 疾病风险预测")
+        lines.append("")
+        for p in dp:
+            name = p.get("disease_name", "")
+            prob = p.get("probability", "")
+            level = p.get("risk_level", "")
+            timeframe = p.get("timeframe", "")
+            model = p.get("risk_model", "")
+            factors = p.get("key_contributing_factors", [])
+            line = f"- **{name}**"
+            if level:
+                line += f"：{level}"
+            if prob:
+                line += f"（发生概率 {prob}）"
+            if timeframe:
+                line += f"，{timeframe}风险"
+            lines.append(line)
+            if model:
+                lines.append(f"  - 评估模型：{model}")
+            if factors:
+                lines.append(f"  - 主要风险因素：{'、'.join(factors)}")
+        lines.append("")
+
+    # --- Risk Warnings ---
+    rw = sr.get("risk_warnings", [])
+    if rw:
+        lines.append("## 风险提示")
+        lines.append("")
+        for w in rw:
+            title = w.get("title", "")
+            desc = w.get("description", "")
+            level = w.get("level", "")
+            icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(level, "⚠️")
+            line = f"- {icon} **{title}**"
+            if desc:
+                line += f"：{desc}"
+            lines.append(line)
+        lines.append("")
+
+    # --- Intervention Prescriptions ---
+    ip = sr.get("intervention_prescriptions", [])
+    if ip:
+        lines.append("## 干预建议")
+        lines.append("")
+        # Group by type
+        type_order = ["diet", "exercise", "sleep", "monitoring", "medication"]
+        type_labels = {
+            "diet": "饮食处方",
+            "exercise": "运动处方",
+            "sleep": "睡眠处方",
+            "monitoring": "监测建议",
+            "medication": "药物建议",
+        }
+        by_type: Dict[str, list] = {}
+        for p in ip:
+            t = p.get("type", "other")
+            by_type.setdefault(t, []).append(p)
+
+        for t in type_order:
+            items = by_type.get(t, [])
+            if not items:
+                continue
+            label = type_labels.get(t, t)
+            lines.append(f"### {label}")
+            for item in items:
+                contents = item.get("content", [])
+                if isinstance(contents, list):
+                    for c in contents:
+                        lines.append(f"- {c}")
+                elif isinstance(contents, str):
+                    lines.append(f"- {contents}")
+            lines.append("")
+
+    # --- Recommended Data Collection ---
+    rdc = sr.get("recommended_data_collection", [])
+    if rdc:
+        lines.append("## 建议补充检查")
+        lines.append("")
+        for r in rdc:
+            item = r.get("item", "")
+            reason = r.get("reason", "")
+            priority = r.get("priority", "")
+            if item:
+                line = f"- {item}"
+                if reason:
+                    line += f"：{reason}"
+                if priority:
+                    line += f"（{priority}）"
+                lines.append(line)
+
+    report = "\n".join(lines)
+    return report if report else "评估完成，但未生成报告内容。"
 
 
 def _format_retrieved_data_info(health_data: Dict[str, Any]) -> str:
@@ -394,11 +579,23 @@ async def chat_stream(
                 return
             logger.info(f"Agent processing complete: intent={agent_state.intent}, skill={agent_state.suggested_skill}, confidence={agent_state.confidence}")
 
+            # Extract structured_result from agent state (same logic as assessment.py)
+            structured_result = _extract_structured_result(agent_state)
+
+            # Transform abnormal_indicators into indicators + warnings
+            transform_abnormal_indicators(structured_result)
+
             # Extract response and metadata from agent state
-            full_response = agent_state.final_response or "抱歉，我无法生成回复。"
             skill_used = agent_state.suggested_skill
             intent = agent_state.intent.value if agent_state.intent else "chat"
             confidence = agent_state.confidence or 0.0
+
+            # Build report from structured_result if available, otherwise use LLM response
+            if structured_result and structured_result.get("population_classification", {}).get("primary_category") not in ("", None):
+                full_response = _build_health_report(structured_result)
+                logger.info("Using structured report as response")
+            else:
+                full_response = agent_state.final_response or "抱歉，我无法生成回复。"
 
             # Extract skill_result if available
             skill_result = None
@@ -474,12 +671,18 @@ async def chat_stream(
                 multi_skill_selection=agent_state.multi_skill_selection if hasattr(agent_state, 'multi_skill_selection') else None,
                 multi_skill_result=agent_state.multi_skill_result if hasattr(agent_state, 'multi_skill_result') else None,
             )
-            # Inject structured_output directly into JSON
+            # Inject structured_output and structured_result directly into JSON
             end_json = end_chunk.model_dump_json()
             so = getattr(agent_state, 'structured_output', None)
+
+            # Build extra fields to inject
+            extra_fields = []
             if isinstance(so, dict):
-                # Remove trailing }, add structured_output, then close outer object
-                end_json = end_json[:-1] + f',"structured_output":{json.dumps(so, ensure_ascii=False)}' + '}'
+                extra_fields.append(f'"structured_output":{json.dumps(so, ensure_ascii=False)}')
+            if structured_result:
+                extra_fields.append(f'"structured_result":{json.dumps(structured_result, ensure_ascii=False)}')
+            if extra_fields:
+                end_json = end_json[:-1] + ',' + ','.join(extra_fields) + '}'
             yield f"data: {end_json}\n\n"
 
         except Exception as e:

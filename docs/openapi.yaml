@@ -5,7 +5,11 @@ info:
     慢病健康管理智能体系统 RESTful API
 
     提供健康评估、风险预测、个性化处方等功能。
-  version: 1.0.0
+
+    ## 核心接口
+    - **标准评估接口** `POST /api/v1/assessment` — 第三方系统集成，返回结构化 JSON
+    - **流式对话接口** `POST /api/v1/chat/streaming` — 前端聊天界面，返回 SSE 事件流
+  version: 2.0.0
   contact:
     name: Medical Agent Team
     email: support@medical-agent.com
@@ -20,22 +24,47 @@ servers:
     description: 生产环境
 
 tags:
+  - name: Assessment
+    description: 健康评估（标准 JSON 接口）
   - name: Chat
-    description: 聊天对话
+    description: 流式对话（SSE 接口）
   - name: Health
-    description: 健康评估
+    description: 健康数据查询
   - name: Plan
     description: 健康计划
   - name: Skills
     description: Skill 管理
+  - name: System
+    description: 系统管理
 
 paths:
-  /api/chat/send:
+  # ── Assessment API ────────────────────────────────────────────────
+  /api/v1/assessment:
     post:
-      tags: [Chat]
-      summary: 发送消息
-      description: 发送用户消息并获取 AI 响应
-      operationId: sendMessage
+      tags: [Assessment]
+      summary: 健康评估
+      description: |
+        执行健康评估并返回结构化 JSON 结果。
+
+        ### Skill 列表
+        | Skill 名称 | 说明 |
+        |---|---|
+        | `cvd-risk-assessment` | 心血管病风险评估 |
+        | `hypertension-risk-assessment` | 高血压风险评估 |
+        | `hyperglycemia-risk-assessment` | 高血糖风险评估 |
+        | `hyperlipidemia-risk-assessment` | 血脂异常风险评估 |
+        | `hyperuricemia-risk-assessment` | 高尿酸风险评估 |
+        | `obesity-risk-assessment` | 肥胖风险评估 |
+        | `population-classification` | 人群分组评估 |
+
+        ### Package 快捷方式
+        - `package@assessment` = 执行全部 7 个 skill
+
+        ### 多轮问卷流程
+        1. 首次请求返回 `status: "missing_basic_info"` + `current_question`
+        2. 前端展示问卷，用户作答后携带 `session_id` + `questionnaire_answers` 再次请求
+        3. 所有必填项收集完毕后返回评估结果
+      operationId: runAssessment
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -43,62 +72,90 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SendMessageRequest'
+              $ref: '#/components/schemas/AssessmentRequest'
             examples:
-              hypertension_query:
-                summary: 高血压咨询
+              single_skill:
+                summary: 单个 skill 评估
                 value:
-                  message: "我的血压是135/88，这正常吗？"
-                  patient_id: "patient-001"
+                  party_id: "123"
+                  skill: "cvd-risk-assessment"
+                  patient_data:
+                    age: 55
+                    gender: "male"
                   vital_signs:
-                    blood_pressure:
-                      systolic: 135
-                      diastolic: 88
-      responses:
-        '200':
-          description: 成功响应
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SendMessageResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '422':
-          $ref: '#/components/responses/ValidationError'
-
-  /api/chat/consultations/{consultation_id}/messages:
-    get:
-      tags: [Chat]
-      summary: 获取对话历史
-      operationId: getConsultationMessages
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - name: consultation_id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: page
-          in: query
-          schema:
-            type: integer
-            default: 1
-        - name: page_size
-          in: query
-          schema:
-            type: integer
-            default: 50
+                    systolic_bp: 150
+                    diastolic_bp: 95
+              package_assessment:
+                summary: 全量评估
+                value:
+                  party_id: "123"
+                  skill: "package@assessment"
+              multi_skill:
+                summary: 多个 skill
+                value:
+                  party_id: "123"
+                  skill: ["cvd-risk-assessment", "hypertension-risk-assessment"]
       responses:
         '200':
           description: 成功
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MessagesResponse'
+                oneOf:
+                  - $ref: '#/components/schemas/AssessmentSuccessResponse'
+                  - $ref: '#/components/schemas/AssessmentQuestionnaireResponse'
+                  - $ref: '#/components/schemas/AssessmentIncompleteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '504':
+          description: 评估超时 (120s)
 
+  # ── Streaming Chat API ────────────────────────────────────────────
+  /api/v1/chat/streaming:
+    post:
+      tags: [Chat]
+      summary: 流式健康对话
+      description: |
+        SSE (Server-Sent Events) 流式对话接口。
+
+        ### 事件类型
+        | 事件 | 说明 |
+        |---|---|
+        | `start` | 会话开始，包含 session_id |
+        | `token` | 流式文本 token |
+        | `end` | 会话结束，包含完整响应、structured_result |
+        | `error` | 错误信息 |
+
+        ### `end` 事件结构
+        ```json
+        {
+          "type": "end",
+          "full_response": "完整的 Markdown 健康报告",
+          "structured_result": { ... },
+          "structured_output": { ... }
+        }
+        ```
+
+        `structured_result` 与 Assessment API 的 `assessment_result` 格式一致。
+      operationId: streamingChat
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StreamingChatRequest'
+      responses:
+        '200':
+          description: SSE 事件流
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE 事件流
+
+  # ── Health Data ────────────────────────────────────────────────────
   /api/health/{patient_id}:
     get:
       tags: [Health]
@@ -120,27 +177,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/HealthDataResponse'
 
-  /api/health/assessments:
-    post:
-      tags: [Health]
-      summary: 创建健康评估
-      operationId: createAssessment
-      security:
-        - ApiKeyAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateAssessmentRequest'
-      responses:
-        '200':
-          description: 成功
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AssessmentResponse'
-
+  # ── Health Plan ────────────────────────────────────────────────────
   /api/plan/{patient_id}:
     get:
       tags: [Plan]
@@ -162,6 +199,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/HealthPlanResponse'
 
+  # ── Skills ─────────────────────────────────────────────────────────
   /api/v3/skills:
     get:
       tags: [Skills]
@@ -207,98 +245,515 @@ components:
       description: "Format: Bearer YOUR_API_KEY"
 
   schemas:
-    SendMessageRequest:
+    # ── Assessment Request ─────────────────────────────────────────
+    AssessmentRequest:
       type: object
       required:
-        - message
-        - patient_id
+        - party_id
+        - skill
       properties:
-        message:
+        party_id:
           type: string
-          description: 用户消息内容
-          maxLength: 5000
-          example: "我的血压是135/88，这正常吗？"
-        patient_id:
-          type: string
-          description: 患者ID
-          pattern: '^[a-zA-Z0-9\-_]+$'
-          example: "patient-001"
-        consultation_id:
-          type: string
-          description: 对话ID（用于继续对话）
-        context:
+          description: 患者/客户标识
+          example: "123"
+        skill:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          description: |
+            要执行的 skill。支持：
+            - 单个名称：`"cvd-risk-assessment"`
+            - 数组：`["cvd-risk-assessment", "hypertension-risk-assessment"]`
+            - 快捷方式：`"package@assessment"` （执行全部 7 个 skill）
+          example: "package@assessment"
+        patient_data:
           type: object
-          description: 额外上下文
+          description: 患者基本信息（可选，缺失时从平安 API 自动获取）
           properties:
             age:
               type: integer
+              example: 55
             gender:
               type: string
-              enum: [male, female, other]
+              enum: [male, female, "男", "女", M, F]
+              example: "male"
         vital_signs:
-          $ref: '#/components/schemas/VitalSigns'
-
-    SendMessageResponse:
-      type: object
-      properties:
-        consultation_id:
-          type: string
-        message_id:
-          type: string
-        response:
-          type: string
-        intent:
-          type: string
-        confidence:
-          type: number
-          format: float
-        skills_used:
-          type: array
-          items:
-            type: string
-        related_info:
           type: object
-        follow_up_suggestions:
+          description: 生命体征数据（可选，缺失时从平安 API 自动获取）
+          properties:
+            systolic_bp:
+              type: number
+              description: 收缩压 (mmHg)
+            diastolic_bp:
+              type: number
+              description: 舒张压 (mmHg)
+            total_cholesterol:
+              type: number
+              description: 总胆固醇 (mmol/L)
+            ldl_c:
+              type: number
+              description: 低密度脂蛋白 (mmol/L)
+            hdl_c:
+              type: number
+              description: 高密度脂蛋白 (mmol/L)
+            tg:
+              type: number
+              description: 甘油三酯 (mmol/L)
+            fasting_glucose:
+              type: number
+              description: 空腹血糖 (mmol/L)
+            hba1c:
+              type: number
+              description: 糖化血红蛋白 (%)
+            uric_acid:
+              type: number
+              description: 尿酸 (μmol/L)
+            bmi:
+              type: number
+              description: BMI (kg/m²)
+            waist:
+              type: number
+              description: 腰围 (cm)
+            alt:
+              type: number
+              description: 谷丙转氨酶 (U/L)
+        medical_history:
+          type: object
+          description: 既往病史
+          properties:
+            disease_labels:
+              type: array
+              items:
+                type: string
+              example: ["高血压", "糖尿病"]
+            disease_history:
+              type: array
+              items:
+                type: string
+        questionnaire_answers:
+          type: object
+          description: 问卷答案 {question_id: value}
+          additionalProperties: true
+          example:
+            gender-select: "male"
+            q_age_picker: 45
+            height-input: 170
+            weight-input: 75
+        session_id:
+          type: string
+          description: 会话ID（首次不传，后续传返回值中的 session_id）
+        re_assessment:
+          type: boolean
+          default: false
+          description: 是否重新评估。为 true 时清空上次会话数据，返回全量问卷题目
+
+    # ── Assessment Responses ───────────────────────────────────────
+    AssessmentSuccessResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          example: 200
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            party_id:
+              type: string
+            skill:
+              type: array
+              items:
+                type: string
+            session_id:
+              type: string
+            assessment_result:
+              $ref: '#/components/schemas/AssessmentResult'
+            metadata:
+              $ref: '#/components/schemas/AssessmentMetadata'
+      example:
+        code: 200
+        success: true
+        data:
+          party_id: "123"
+          skill: ["population-classification"]
+          session_id: "asm_123_multi_1715000000"
+          assessment_result:
+            population_classification:
+              primary_category: "慢病"
+              grouping_basis:
+                - disease: "高血压"
+                  type: "1级高血压"
+                  level: "低危"
+                  note: "1级高血压低危"
+            abnormal_indicators:
+              indicators:
+                - name: "BMI"
+                  value: 27.0
+                  unit: "kg/m²"
+                  reference_range: "18.5-23.9"
+                  severity: "超重"
+                  clinical_note: "BMI≥24"
+              warnings:
+                - title: "超重预警"
+                  tip: "注意控制体重，避免久坐"
+                  indicator_indices: [0]
+            disease_prediction: []
+            intervention_prescriptions:
+              - type: "diet"
+                title: "饮食处方"
+                content: ["均衡饮食，控制钠盐摄入<6g/天"]
+                priority: "high"
+            recommended_data_collection: []
+            risk_warnings:
+              - title: "超重提醒"
+                description: "BMI 27.0，建议控制体重"
+                level: "low"
+          metadata:
+            data_source: "ping_an_api"
+            execution_time_ms: 5300
+            timestamp: "2026-05-06T10:30:00"
+
+    AssessmentQuestionnaireResponse:
+      type: object
+      description: 当缺少必填信息时返回，包含当前需要作答的问卷题目
+      properties:
+        code:
+          type: integer
+          example: 200
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            party_id:
+              type: string
+            skill:
+              type: array
+              items:
+                type: string
+            session_id:
+              type: string
+            status:
+              type: string
+              enum: [missing_basic_info, re_assessment]
+            questionnaire_type:
+              type: string
+            missing_fields:
+              type: array
+              items:
+                type: string
+            current_question:
+              $ref: '#/components/schemas/QuestionItem'
+            recommended_data_collection:
+              type: array
+              items:
+                $ref: '#/components/schemas/DataCollectionRecommendation'
+            questions:
+              type: array
+              items:
+                $ref: '#/components/schemas/QuestionItem'
+              description: 仅 re_assessment 时返回全量题目
+            metadata:
+              $ref: '#/components/schemas/AssessmentMetadata'
+
+    AssessmentIncompleteResponse:
+      type: object
+      description: 当 skill 判定数据不足以完成评估时返回
+      properties:
+        code:
+          type: integer
+          example: 200
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            party_id:
+              type: string
+            skill:
+              type: array
+              items:
+                type: string
+            session_id:
+              type: string
+            status:
+              type: string
+              example: "incomplete"
+            assessment_result:
+              $ref: '#/components/schemas/AssessmentResult'
+            required_data:
+              type: array
+              items:
+                type: string
+            message:
+              type: string
+            metadata:
+              $ref: '#/components/schemas/AssessmentMetadata'
+
+    # ── Core Data Models ───────────────────────────────────────────
+    AssessmentResult:
+      type: object
+      description: 评估结果核心结构
+      properties:
+        population_classification:
+          $ref: '#/components/schemas/PopulationClassification'
+        abnormal_indicators:
+          $ref: '#/components/schemas/AbnormalIndicatorsSection'
+        disease_prediction:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiseasePrediction'
+        intervention_prescriptions:
+          type: array
+          items:
+            $ref: '#/components/schemas/InterventionPrescription'
+        recommended_data_collection:
+          type: array
+          items:
+            $ref: '#/components/schemas/DataCollectionRecommendation'
+        risk_warnings:
+          type: array
+          items:
+            type: object
+            properties:
+              title:
+                type: string
+              description:
+                type: string
+              level:
+                type: string
+                enum: [low, medium, high]
+
+    PopulationClassification:
+      type: object
+      properties:
+        primary_category:
+          type: string
+          description: "健康 | 亚健康 | 慢病 | 重症"
+          example: "慢病"
+        grouping_basis:
+          type: array
+          items:
+            type: object
+            properties:
+              disease:
+                type: string
+                description: 疾病名称
+                example: "高血压"
+              type:
+                type: string
+                description: 疾病分类
+                example: "一级高血压"
+              level:
+                type: string
+                description: 风险分层
+                example: "低危"
+              note:
+                type: string
+                description: 提示文本
+                example: "一级高血压低危"
+
+    AbnormalIndicatorsSection:
+      type: object
+      description: |
+        异常指标 + 异常预警。
+
+        **预警与指标是多对多关系**：一个预警可关联多个指标，一个指标也可被多个预警关联。
+
+        `indicator_indices` 是 `indicators` 数组的下标。
+      properties:
+        indicators:
+          type: array
+          items:
+            $ref: '#/components/schemas/AbnormalIndicator'
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/AbnormalWarning'
+
+    AbnormalIndicator:
+      type: object
+      properties:
+        name:
+          type: string
+          description: 指标名称
+          example: "收缩压"
+        value:
+          type: number
+          description: 测量值
+          example: 152
+        unit:
+          type: string
+          description: 单位
+          example: "mmHg"
+        reference_range:
+          type: string
+          description: 正常参考范围
+          example: "<140"
+        severity:
+          type: string
+          description: 严重程度
+          example: "偏高"
+        clinical_note:
+          type: string
+          description: 临床解读（用于关联预警）
+          example: "高血压"
+
+    AbnormalWarning:
+      type: object
+      description: 异常预警
+      properties:
+        title:
+          type: string
+          description: 预警标题
+          example: "血压异常预警"
+        tip:
+          type: string
+          description: 温馨提示（≤20字）
+          example: "建议低盐饮食，规律监测血压"
+        indicator_indices:
+          type: array
+          items:
+            type: integer
+          description: 关联指标的下标数组（对应 indicators 数组）
+          example: [0, 1]
+
+    DiseasePrediction:
+      type: object
+      properties:
+        disease_name:
+          type: string
+          example: "心血管病"
+        probability:
+          type: string
+          example: "10%-20%"
+        risk_level:
+          type: string
+          description: "低危 | 中危 | 高危 | 很高危"
+          example: "中危"
+        timeframe:
+          type: string
+          example: "10年"
+        risk_model:
+          type: string
+          example: "China-PAR"
+        key_contributing_factors:
           type: array
           items:
             type: string
 
-    MessagesResponse:
+    InterventionPrescription:
       type: object
       properties:
-        consultation_id:
+        type:
           type: string
-        patient_id:
+          description: "diet | exercise | sleep | monitoring | medication"
+          example: "diet"
+        title:
           type: string
-        messages:
-          type: array
-          items:
-            $ref: '#/components/schemas/Message'
-        total:
-          type: integer
-        page:
-          type: integer
-        page_size:
-          type: integer
-        pages:
-          type: integer
+          example: "饮食处方"
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          description: 处方内容（字符串或字符串数组）
+        priority:
+          type: string
+          enum: [high, medium, low]
+          example: "high"
 
-    Message:
+    DataCollectionRecommendation:
+      type: object
+      properties:
+        item:
+          type: string
+          description: 建议补充的检查/指标名称
+          example: "糖化血红蛋白"
+        reason:
+          type: string
+          example: "缺少糖化血红蛋白数据，建议补充检测"
+        priority:
+          type: string
+          enum: [recommended, optional]
+          example: "recommended"
+
+    AssessmentMetadata:
+      type: object
+      properties:
+        data_source:
+          type: string
+          description: "ping_an_api | request_body | request_body_merged"
+        execution_time_ms:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        skill_version:
+          type: string
+
+    QuestionItem:
       type: object
       properties:
         id:
           type: string
-        role:
+        type:
           type: string
-          enum: [user, assistant]
-        content:
+        title:
           type: string
-        intent:
+        componentType:
           type: string
-        timestamp:
+        required:
+          type: boolean
+        options:
+          type: array
+          items:
+            type: object
+        showNavigation:
+          type: boolean
+        hasNext:
+          type: boolean
+        hasPrev:
+          type: boolean
+        currentIndex:
+          type: integer
+        totalQs:
+          type: integer
+        prevQuestionId:
           type: string
-          format: date-time
+        nextQuestionId:
+          type: string
 
+    # ── Streaming Chat ─────────────────────────────────────────────
+    StreamingChatRequest:
+      type: object
+      required:
+        - patient_id
+        - message
+      properties:
+        session_id:
+          type: string
+          description: 会话ID（首次不传，自动创建）
+        patient_id:
+          type: string
+          description: 患者ID
+        message:
+          type: string
+          description: 用户消息
+          minLength: 1
+        questionnaire_answers:
+          type: object
+          description: 问卷答案
+          additionalProperties: true
+
+    # ── Legacy Schemas ─────────────────────────────────────────────
     VitalSigns:
       type: object
       properties:
@@ -318,16 +773,10 @@ components:
           properties:
             fasting:
               type: number
-              minimum: 2
-              maximum: 30
             postprandial:
               type: number
-              minimum: 2
-              maximum: 50
             hba1c:
               type: number
-              minimum: 3
-              maximum: 15
         lipid:
           type: object
           properties:
@@ -343,40 +792,6 @@ components:
           type: number
         bmi:
           type: number
-
-    CreateAssessmentRequest:
-      type: object
-      required:
-        - patient_id
-        - assessment_type
-      properties:
-        patient_id:
-          type: string
-        assessment_type:
-          type: string
-          enum: [basic, comprehensive, specific]
-        vital_signs:
-          $ref: '#/components/schemas/VitalSigns'
-
-    AssessmentResponse:
-      type: object
-      properties:
-        assessment_id:
-          type: string
-        created_at:
-          type: string
-          format: date-time
-        results:
-          type: object
-          properties:
-            conditions:
-              type: array
-              items:
-                type: object
-            recommendations:
-              type: array
-              items:
-                type: string
 
     HealthDataResponse:
       type: object
@@ -416,77 +831,11 @@ components:
           type: object
           properties:
             diet:
-              $ref: '#/components/schemas/DietPrescription'
+              type: object
             exercise:
-              $ref: '#/components/schemas/ExercisePrescription'
+              type: object
             medication:
-              $ref: '#/components/schemas/MedicationPrescription'
-
-    DietPrescription:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [diet_prescription]
-        title:
-          type: string
-        description:
-          type: string
-        recommendations:
-          type: array
-          items:
-            type: string
-        restrictions:
-          type: array
-          items:
-            type: string
-
-    ExercisePrescription:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [exercise_prescription]
-        title:
-          type: string
-        frequency:
-          type: string
-        duration_per_session:
-          type: string
-        intensity:
-          type: string
-        activities:
-          type: array
-          items:
-            type: string
-
-    MedicationPrescription:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [medication_prescription]
-        medications:
-          type: array
-          items:
-            type: object
-            properties:
-              name:
-                type: string
-              dosage:
-                type: string
-              frequency:
-                type: string
-              notes:
-                type: string
-
-    SkillsListResponse:
-      type: object
-      properties:
-        skills:
-          type: array
-          items:
-            $ref: '#/components/schemas/Skill'
+              type: object
 
     Skill:
       type: object
@@ -507,6 +856,14 @@ components:
           type: array
           items:
             type: string
+
+    SkillsListResponse:
+      type: object
+      properties:
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/Skill'
 
     SkillDetailResponse:
       allOf:
