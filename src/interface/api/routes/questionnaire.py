@@ -47,6 +47,18 @@ def _load_session_answers(session_id: str, party_id: str) -> Dict[str, Any]:
         if q_id and value is not None and value != "" and value != []:
             answers[q_id] = value
 
+    # Reverse-map disease-history: reconstruct [[disease, severity], ...]
+    # After the loop, answers["disease-history"] = ["hypertension", "diabetes"]
+    # health_data["disease_severity"] = {"hypertension": "moderate", ...}
+    if "disease-history" in answers:
+        labels = answers["disease-history"]
+        severity_map = health_data.get("disease_severity", {})
+        reconstructed = []
+        for label in labels:
+            severity = severity_map.get(label, "")
+            reconstructed.append([label, severity] if severity else [label])
+        answers["disease-history"] = reconstructed
+
     return answers
 
 

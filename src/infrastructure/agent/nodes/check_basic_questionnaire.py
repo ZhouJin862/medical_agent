@@ -58,6 +58,20 @@ def map_questionnaire_answers_to_health_data(
     for q_id, value in answers.items():
         health_key = _ANSWER_TO_HEALTH_DATA_KEY.get(q_id)
         if health_key and value is not None and value != "" and value != []:
+            # disease-history: [["hypertension", "moderate"], ...] → diseaseLabels + disease_severity
+            if q_id == "disease-history" and isinstance(value, list):
+                labels = []
+                severity_map = {}
+                for item in value:
+                    if isinstance(item, list) and len(item) >= 2:
+                        labels.append(item[0])
+                        severity_map[item[0]] = item[1]
+                    elif isinstance(item, str):
+                        labels.append(item)
+                if labels:
+                    result["diseaseLabels"] = labels
+                    result["disease_severity"] = severity_map
+                continue
             result[health_key] = value
     return result
 
