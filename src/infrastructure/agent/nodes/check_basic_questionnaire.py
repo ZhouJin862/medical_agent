@@ -27,6 +27,7 @@ QUESTIONNAIRE_FIELD_MAP: Dict[str, Tuple[str, str]] = {
     "height-input": ("vital_signs", "height"),
     "weight-input": ("vital_signs", "weight"),
     "disease-history": ("medical_history", "disease_labels"),
+    "symptoms": ("medical_history", "symptoms"),
 }
 
 
@@ -73,6 +74,13 @@ def map_questionnaire_answers_to_health_data(
                     result["disease_severity"] = severity_map
                 continue
             result[health_key] = value
+        # disease-history: [] → mark as "answered_empty" to distinguish from "not answered"
+        elif q_id == "disease-history" and isinstance(value, list) and len(value) == 0:
+            result["diseaseLabels"] = []
+            result["_dh_explicit_empty"] = True
+        # symptoms: [] → mark as answered (no symptoms)
+        elif q_id == "symptoms" and isinstance(value, list) and len(value) == 0:
+            result["symptoms"] = []
     return result
 
 
@@ -84,8 +92,9 @@ def _get_field_value(patient_context, section: str, key: str) -> Any:
     if not section_data or not isinstance(section_data, dict):
         return None
     value = section_data.get(key)
-    if value is None or value == "" or value == []:
+    if value is None or value == "":
         return None
+    # Keep empty list [] as-is to distinguish from "not set"
     return value
 
 
@@ -197,19 +206,27 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
             missing_required_questions.append(q)
             logger.info(f"Missing basic field: {section}.{key} (question: {q_id})")
 
-    # 5. Check disease-history even when all required fields are present
+    # 5. Check disease-history and symptoms even when all required fields are present
     dh_section, dh_key = QUESTIONNAIRE_FIELD_MAP["disease-history"]
     dh_value = _get_field_value(state.patient_context, dh_section, dh_key)
     dh_question = next((q for q in data_questions if q.get("id") == "disease-history"), None)
-    dh_missing = dh_value is None and dh_question is not None
+    symptoms_question = next((q for q in data_questions if q.get("id") == "symptoms"), None)
+    # dh_value: None = not answered, [] = answered empty (no diseases), list with items = has diseases
+    dh_not_answered = dh_value is None and dh_question is not None
+    dh_empty = isinstance(dh_value, list) and len(dh_value) == 0
 
-    if not missing_fields and not dh_missing:
+    # Check symptoms answered status (only relevant when dh_empty)
+    symp_section, symp_key = QUESTIONNAIRE_FIELD_MAP["symptoms"]
+    symp_value = _get_field_value(state.patient_context, symp_section, symp_key) if dh_empty else None
+    symp_not_answered = symp_value is None and symptoms_question is not None
+
+    if not missing_fields and not dh_not_answered and not (dh_empty and symp_not_answered):
         state.missing_basic_fields = []
         logger.info("All basic questionnaire fields present, continuing workflow")
         return state
 
-    # Only disease-history missing (all required fields present)
-    if not missing_fields and dh_missing:
+    # disease-history not answered (all required fields present) → ask disease-history
+    if not missing_fields and dh_not_answered:
         missing_required_questions = []
         return_questions = [dh_question]
         state.missing_basic_fields = ["disease_labels"]  # non-empty to trigger route
@@ -228,6 +245,24 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
             "questions": return_questions,
         }
         logger.info("All required fields present, but disease-history missing — returning it")
+        return state
+
+    # disease-history answered empty (no diseases) + symptoms not answered → ask symptoms
+    if not missing_fields and dh_empty and symp_not_answered:
+        return_questions = [symptoms_question] if symptoms_question else []
+        if not return_questions:
+            state.missing_basic_fields = []
+            return state
+        state.missing_basic_fields = ["symptoms"]
+        state.final_response = _build_missing_response([], return_questions)
+        state.structured_output = {
+            "status": "missing_basic_info",
+            "questionnaire_type": questionnaire.questionnaire_id,
+            "missing_fields": [],
+            "recommended_data_collection": [],
+            "questions": return_questions,
+        }
+        logger.info("No diseases selected — returning symptoms question")
         return state
 
     # 6. Determine return strategy based on health archive data availability

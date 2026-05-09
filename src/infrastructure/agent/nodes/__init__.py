@@ -280,7 +280,7 @@ def _map_ping_an_flat_fields_to_vital_signs(api_data: Dict[str, Any]) -> Dict[st
             mapped_api_fields.add(api_field)
 
     # Second pass: preserve all unmapped raw API fields (age, gender, and any future fields)
-    _INTERNAL_META_KEYS = {"_api_response", "_metadata", "diseaseLabels"}
+    _INTERNAL_META_KEYS = {"_api_response", "_metadata", "diseaseLabels", "_dh_explicit_empty", "symptoms", "disease_severity"}
     for api_field, value in api_data.items():
         if api_field in _INTERNAL_META_KEYS:
             continue
@@ -531,7 +531,8 @@ async def load_patient_node(state: AgentState) -> AgentState:
                 basic_info["gender"] = api_data["gender"]
 
         # Extract diseaseLabels (new field with disease names)
-        disease_labels = api_data.get("diseaseLabels", [])
+        # Only set if key exists in api_data — distinguish "not provided" from "empty list"
+        disease_labels = api_data.get("diseaseLabels") if "diseaseLabels" in api_data else None
 
         # Detect API response format: indicatorItems vs cycleItems vs flat fields
         if "indicatorItems" in api_data:
@@ -547,6 +548,7 @@ async def load_patient_node(state: AgentState) -> AgentState:
                 "chronic_diseases": diagnoses,
                 "disease_labels": disease_labels,
                 "sport_records": api_data.get("sportRecords", {}),
+                "symptoms": api_data.get("symptoms"),
             }
         elif "cycleItems" in api_data and isinstance(api_data["cycleItems"], list):
             # Ping An Health Archive cycleItems format: {itemName, itemValue} pairs
@@ -566,6 +568,7 @@ async def load_patient_node(state: AgentState) -> AgentState:
                 "chronic_diseases": diagnoses,
                 "disease_labels": disease_labels,
                 "sport_records": api_data.get("sportRecords", {}),
+                "symptoms": api_data.get("symptoms"),
             }
         else:
             # New format: flat fields (systolicPressure, diastolicPressure, etc.)
@@ -580,6 +583,7 @@ async def load_patient_node(state: AgentState) -> AgentState:
                 "chronic_diseases": diagnoses,
                 "disease_labels": disease_labels,
                 "sport_records": api_data.get("sportRecords", {}),
+                "symptoms": api_data.get("symptoms"),
             }
 
         patient_data = {
@@ -681,8 +685,9 @@ async def load_patient_node(state: AgentState) -> AgentState:
                             "medications": api_data.get("medications", []),
                             "allergies": api_data.get("allergies", []),
                             "chronic_diseases": diagnoses,
-                            "disease_labels": api_data.get("diseaseLabels", []),
+                            "disease_labels": api_data.get("diseaseLabels") if "diseaseLabels" in api_data else None,
                             "sport_records": api_data.get("sportRecords", {}),
+                "symptoms": api_data.get("symptoms"),
                         }
 
                         patient_data = {

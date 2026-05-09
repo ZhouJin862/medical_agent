@@ -361,11 +361,14 @@ def _build_current_question(
     includes type, componentType, options, etc.) and enriches it with
     navigation metadata (hasNext, hasPrev, currentIndex, totalQs).
     """
-    if not recommended or not questions:
+    if not questions:
         return None
 
-    # The first item in recommended_data_collection is the next question to show
-    target_id = recommended[0].get("id")
+    # Fallback: no recommended but have questions → use first question
+    if not recommended:
+        target_id = questions[0].get("id")
+    else:
+        target_id = recommended[0].get("id")
     if not target_id:
         return recommended[0]
 
