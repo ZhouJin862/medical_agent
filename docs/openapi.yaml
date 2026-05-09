@@ -341,6 +341,9 @@ components:
             q_age_picker: 45
             height-input: 170
             weight-input: 75
+            disease-history:
+              - ["hypertension", "moderate"]
+              - ["diabetes", "mild"]
         session_id:
           type: string
           description: 会话ID（首次不传，后续传返回值中的 session_id）

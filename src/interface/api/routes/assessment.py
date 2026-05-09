@@ -134,30 +134,55 @@ async def run_assessment(request: AssessmentRequest):
     _save_session_data(session_id, health_data or {})
 
     # 2. Process through SkillsIntegratedAgent (same LangGraph pipeline)
-    #    Serial execution — DB sessions are not safe for concurrent access.
-    first_skill = skills[0]
+    is_package = len(skills) > 1 or (len(skills) == 1 and skills[0] == "package@assessment")
+    all_structured_results: list[Dict[str, Any]] = []
 
     try:
         from src.infrastructure.agent.skills_integration import SkillsIntegratedAgent
 
         agent = SkillsIntegratedAgent()
 
-        # Run first skill (with questionnaire check)
-        t0 = time.time()
-        agent_state = await asyncio.wait_for(
-            agent.process(
-                user_input=f"请进行{','.join(skills)}评估",
-                patient_id=f"patient_{request.party_id}",
-                party_id=request.party_id,
-                ping_an_health_data=health_data,
-                suggested_skill=first_skill,
-                session_id=session_id,
-                require_basic_questionnaire=True,
-            ),
-            timeout=120.0,
-        )
-        elapsed = int((time.time() - t0) * 1000)
-        _log_skill_perf(first_skill, elapsed, agent_state)
+        if is_package:
+            # Package assessment: orchestration handled inside execute_claude_skill_node
+            # Phase transition: if user submitted sport_target answer, bump to Phase 3
+            current_phase = health_data.get("_orchestration_phase", 0)
+            if current_phase == 2 and health_data.get("sport_target"):
+                health_data["_orchestration_phase"] = 3
+            _save_session_data(session_id, health_data or {})
+
+            t0 = time.time()
+            agent_state = await asyncio.wait_for(
+                agent.process(
+                    user_input="请进行全面健康评估",
+                    patient_id=f"patient_{request.party_id}",
+                    party_id=request.party_id,
+                    ping_an_health_data=health_data,
+                    suggested_skill="package@assessment",
+                    session_id=session_id,
+                    require_basic_questionnaire=True,
+                ),
+                timeout=120.0,
+            )
+            elapsed = int((time.time() - t0) * 1000)
+            _log_skill_perf("package@assessment", elapsed, agent_state)
+        else:
+            # Single skill execution
+            first_skill = skills[0]
+            t0 = time.time()
+            agent_state = await asyncio.wait_for(
+                agent.process(
+                    user_input=f"请进行{first_skill}评估",
+                    patient_id=f"patient_{request.party_id}",
+                    party_id=request.party_id,
+                    ping_an_health_data=health_data,
+                    suggested_skill=first_skill,
+                    session_id=session_id,
+                    require_basic_questionnaire=True,
+                ),
+                timeout=120.0,
+            )
+            elapsed = int((time.time() - t0) * 1000)
+            _log_skill_perf(first_skill, elapsed, agent_state)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Assessment timed out (120s)")
     except Exception as e:
@@ -168,8 +193,8 @@ async def run_assessment(request: AssessmentRequest):
     so = getattr(agent_state, 'structured_output', None)
     first_skill_needs_questionnaire = isinstance(so, dict) and so.get("status") == "missing_basic_info"
 
-    if not first_skill_needs_questionnaire:
-        # Run remaining skills sequentially
+    if not first_skill_needs_questionnaire and not is_package:
+        # Run remaining skills sequentially (only for non-package single skill mode)
         remaining_skills = skills[1:]
         all_structured_results: list[Dict[str, Any]] = []
         for extra_skill in remaining_skills:
@@ -240,6 +265,32 @@ async def run_assessment(request: AssessmentRequest):
                 "missing_fields": so.get("missing_fields", []),
                 "current_question": current_q,
                 "recommended_data_collection": recommended,
+                "metadata": {
+                    "data_source": data_source,
+                    "execution_time_ms": elapsed_ms,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            },
+        })
+
+    # 3.5 Check for goal_selection status (package assessment orchestration)
+    so = getattr(agent_state, 'structured_output', None)
+    if isinstance(so, dict) and so.get("status") == "goal_selection":
+        # Save orchestration state to session for next request
+        health_data["_orchestration_phase"] = so.get("_orchestration_phase", 2)
+        health_data["_population_result"] = so.get("population_classification", {})
+        _save_session_data(session_id, health_data or {})
+
+        return JSONResponse(content={
+            "code": 200,
+            "success": True,
+            "data": {
+                "party_id": request.party_id,
+                "skill": request.skill,
+                "session_id": session_id,
+                "status": "goal_selection",
+                "current_question": so.get("current_question"),
+                "population_classification": so.get("population_classification"),
                 "metadata": {
                     "data_source": data_source,
                     "execution_time_ms": elapsed_ms,
@@ -518,6 +569,9 @@ def _extract_structured_result(agent_state) -> Dict[str, Any]:
         sr = structured_output.get("structured_result")
         if sr and isinstance(sr, dict):
             return sr
+        # Direct modules from package assessment Phase 3
+        if "modules" in structured_output and isinstance(structured_output.get("modules"), dict):
+            return structured_output
 
     # 3. Try from health_assessment
     health_assessment = getattr(agent_state, 'health_assessment', None)

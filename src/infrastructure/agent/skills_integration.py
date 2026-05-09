@@ -4,6 +4,7 @@ Skills Integration - Integrates SkillsRegistry with the agent workflow.
 Provides updated nodes and utilities for LLM-based skill selection
 and Claude Skills execution (including composite skills).
 """
+import json
 import logging
 import time
 from typing import Optional, Dict, Any
@@ -41,27 +42,6 @@ logger = logging.getLogger(__name__)
 async def classify_intent_with_llm_node(state: AgentState) -> AgentState:
     """
     Classify user intent using LLM-based skill selection with multi-skill support.
-
-    This replaces the original classify_intent_node to use the EnhancedLLMSkillSelector,
-    which supports both single-skill and multi-skill selection for complex user intents.
-
-    Multi-Skill Support:
-        - Detects multiple intents in user input (e.g., "assess blood pressure AND diabetes risk")
-        - Returns MultiSkillSelection with primary and secondary skills
-        - Creates ExecutionPlan with parallel/sequential/mixed execution modes
-        - Stores selection metadata for debugging and analysis
-
-    Args:
-        state: Current agent state
-
-    Returns:
-        Updated agent state with:
-        - intent: Classified intent type (IntentType)
-        - suggested_skill: Primary skill name (for backward compatibility)
-        - confidence: Selection confidence score
-        - multi_skill_selection: Full MultiSkillSelection result as dict
-        - execution_plan: ExecutionPlan for multi-skill orchestration
-        - selection_metadata: Debugging metadata (reasoning, alternatives, etc.)
     """
     logger.info(f"Classifying intent with LLM: {state.user_input[:50]}...")
     state.status = "classifying_intent"
@@ -245,8 +225,12 @@ async def execute_claude_skill_node(state: AgentState) -> AgentState:
                 state.error_message = "Database session unavailable"
                 return state
 
+            # Path -1: Package assessment orchestration (highest priority)
+            if state.suggested_skill == "package@assessment":
+                skill_executed = await _execute_package_assessment(session, state)
+
             # Path 0: Multi-skill execution (highest priority - P1 integration)
-            if has_multi_skill_plan:
+            elif has_multi_skill_plan:
                 skills = state.execution_plan.get("skills", [])
                 logger.info(f"Multi-skill execution: {len(skills)} skills")
                 skill_executed = await _execute_multi_skill_plan(
@@ -301,6 +285,225 @@ async def execute_claude_skill_node(state: AgentState) -> AgentState:
         }
 
     return state
+
+
+# ============================================================================
+# Package Assessment Orchestration
+# ============================================================================
+
+_INSIGHT_SKILLS = [
+    "cvd-risk-assessment",
+    "hypertension-risk-assessment",
+    "hyperglycemia-risk-assessment",
+    "hyperlipidemia-risk-assessment",
+    "hyperuricemia-risk-assessment",
+    "obesity-risk-assessment",
+]
+
+
+async def _execute_package_assessment(session, state: AgentState) -> bool:
+    """Orchestrate package@assessment: population-classification → goal-recommendation → insight skills.
+
+    Phase 1: population-classification
+    Phase 2: goal-recommendation → returns goal_selection
+    Phase 3: parallel insight skills (after user selects goal)
+    """
+    import asyncio
+    from src.domain.questionnaire.services.questionnaire_service import QuestionnaireService
+    from src.infrastructure.agent.skill_md_executor import execute_skill_via_skill_md
+
+    health_data = state.ping_an_health_data or {}
+
+    # Determine orchestration phase from session data
+    phase = health_data.get("_orchestration_phase", 0)
+    logger.info(f"Package assessment: phase={phase}, health_data_keys={list(health_data.keys())[:10]}")
+    # Also handles phase=2 when sport_target was submitted (assessment.py bumps to 3)
+    if phase >= 3 or (phase == 2 and health_data.get("sport_target")):
+        logger.info("Package assessment Phase 3: executing insight skills")
+        population_result = health_data.get("_population_result", {})
+        selected_goal = health_data.get("sport_target", "")
+
+        async def _run_insight(skill_name: str) -> tuple:
+            try:
+                executor = ClaudeSkillsExecutor(session)
+                patient_context = None
+                if state.patient_context:
+                    patient_context = {
+                        "basic_info": state.patient_context.basic_info,
+                        "vital_signs": state.patient_context.vital_signs,
+                        "medical_history": state.patient_context.medical_history,
+                    }
+                result = await executor.execute_skill(
+                    skill_name=skill_name,
+                    user_input=state.user_input,
+                    patient_context=patient_context,
+                )
+                return skill_name, result, None
+            except Exception as e:
+                logger.warning(f"Insight skill {skill_name} failed: {e}")
+                return skill_name, None, e
+
+        tasks = [_run_insight(s) for s in _INSIGHT_SKILLS]
+        results = await asyncio.gather(*tasks)
+
+        # Build merged structured_output
+        all_modules = {}
+        for skill_name, result, error in results:
+            if error or not result:
+                continue
+            # Extract structured_output from result
+            structured = result.get("structured_output") or result.get("final_output") or {}
+            if isinstance(structured, dict) and "modules" in structured:
+                modules = structured["modules"]
+                for k, v in modules.items():
+                    if k in all_modules and isinstance(v, list) and isinstance(all_modules[k], list):
+                        all_modules[k].extend(v)
+                    else:
+                        all_modules[k] = v
+
+        structured_result = {
+            "population_classification": population_result.get("population_classification", {}),
+            "modules": all_modules,
+            "sport_target": selected_goal,
+        }
+        state.structured_output = structured_result
+        state.final_response = json.dumps(structured_result, ensure_ascii=False)
+        logger.info(f"Package assessment Phase 3 complete: {len(results)} skills, {len(all_modules)} modules")
+        return True
+
+    # ---- Phase 1: population-classification ----
+    logger.info("Package assessment Phase 1: population-classification")
+    pop_result = await _execute_single_skill_for_orchestration(
+        session, state, "population-classification"
+    )
+    if not pop_result:
+        logger.error("population-classification failed, falling back to single skill execution")
+        return False
+
+    # Extract population classification result
+    pop_structured = _extract_modules(pop_result)
+    population_classification = {}
+    if pop_structured:
+        modules = pop_structured.get("modules", {})
+        population_classification = modules.get("population_classification", {})
+
+    # ---- Phase 2: goal-recommendation ----
+    logger.info("Package assessment Phase 2: goal-recommendation")
+
+    # Load goal pool from DB
+    goal_pool = []
+    try:
+        questionnaire = await QuestionnaireService.get_by_type(session, "health-goals")
+        if questionnaire and questionnaire.questions:
+            for q in questionnaire.questions:
+                if q.get("id") == "sport_target1":
+                    goal_pool = q.get("options", [])
+                    break
+    except Exception as e:
+        logger.warning(f"Failed to load goal pool: {e}")
+
+    # Build goal-recommender input
+    abnormal_indicators = {}
+    disease_prediction = []
+    symptoms = health_data.get("symptoms", [])
+
+    goal_input = {
+        "population_classification": population_classification,
+        "abnormal_indicators": abnormal_indicators,
+        "disease_prediction": disease_prediction,
+        "symptoms": symptoms,
+        "goal_pool": goal_pool,
+    }
+
+    # Execute goal-recommender script directly (sync, wrap in executor)
+    recommended_goals = []
+    try:
+        loop = asyncio.get_event_loop()
+        goal_result = await loop.run_in_executor(
+            None,
+            lambda: execute_skill_via_skill_md("goal-recommendation", goal_input),
+        )
+        if goal_result and isinstance(goal_result, dict):
+            # SkillWorkflowExecutor wraps script output in "final_output"
+            final_output = goal_result.get("final_output")
+            if isinstance(final_output, dict):
+                recommended_goals = final_output.get("recommended_goals", [])
+            if not recommended_goals:
+                recommended_goals = goal_result.get("recommended_goals", [])
+    except Exception as e:
+        logger.warning(f"Goal-recommendation skill failed: {e}")
+
+    if not recommended_goals:
+        # Fallback: use all goals
+        recommended_goals = goal_pool[:4]
+        logger.info(f"Goal recommendation fallback: using {len(recommended_goals)} goals")
+
+    # Return goal_selection status
+    sport_question = {
+        "id": "sport_target1",
+        "type": "single",
+        "componentType": "image",
+        "title": "选择您的运动目标",
+        "options": recommended_goals,
+        "required": True,
+        "showNavigation": True,
+        "nextButtonText": "加油我可以",
+    }
+
+    state.structured_output = {
+        "status": "goal_selection",
+        "current_question": sport_question,
+        "population_classification": population_classification,
+        "_orchestration_phase": 2,
+    }
+    state.final_response = json.dumps(state.structured_output, ensure_ascii=False)
+    logger.info(f"Package assessment Phase 2 complete: {len(recommended_goals)} goals recommended")
+    return True
+
+
+async def _execute_single_skill_for_orchestration(
+    session, state: AgentState, skill_name: str,
+) -> Optional[Dict]:
+    """Execute a single skill and return its result dict."""
+    try:
+        executor = ClaudeSkillsExecutor(session)
+        patient_context = None
+        if state.patient_context:
+            patient_context = {
+                "basic_info": state.patient_context.basic_info,
+                "vital_signs": state.patient_context.vital_signs,
+                "medical_history": state.patient_context.medical_history,
+            }
+
+        result = await executor.execute_skill(
+            skill_name=skill_name,
+            user_input=state.user_input,
+            patient_context=patient_context,
+        )
+
+        structured = result.get("structured_output")
+        if structured and isinstance(structured, dict) and "modules" in structured:
+            return structured
+
+        # Try extracting from result_data
+        result_data = result.get("result_data")
+        if isinstance(result_data, dict):
+            return result_data
+
+        return result
+    except Exception as e:
+        logger.error(f"Failed to execute skill {skill_name}: {e}")
+        return None
+
+
+def _extract_modules(result: Any) -> Optional[Dict]:
+    """Extract modules dict from a skill execution result."""
+    if isinstance(result, dict):
+        if "modules" in result:
+            return result
+        if "structured_output" in result and isinstance(result["structured_output"], dict):
+            return result["structured_output"]
+    return result if isinstance(result, dict) else None
 
 
 # ============================================================================

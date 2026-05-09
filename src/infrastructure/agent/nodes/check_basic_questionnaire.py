@@ -53,6 +53,7 @@ def map_questionnaire_answers_to_health_data(
         "height-input": "height",
         "weight-input": "weight",
         "disease-history": "diseaseLabels",
+        "sport_target1": "sport_target",
     }
 
     result: Dict[str, Any] = {}
