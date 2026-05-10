@@ -566,10 +566,11 @@ def _extract_structured_result(agent_state) -> Dict[str, Any]:
     # 2. Try from structured_output (set by execute node on success)
     structured_output = getattr(agent_state, 'structured_output', None)
     if isinstance(structured_output, dict):
+        # Phase 3: prefer complete structured_result (merged from all skills)
         sr = structured_output.get("structured_result")
         if sr and isinstance(sr, dict):
             return sr
-        # Direct modules from package assessment Phase 3
+        # Fallback: return modules dict for single-skill cases
         if "modules" in structured_output and isinstance(structured_output.get("modules"), dict):
             return structured_output
 
@@ -703,25 +704,47 @@ def transform_abnormal_indicators(sr: Dict[str, Any]) -> None:
     replaced by::
 
         {
-            "indicators": [...],    # original items, unchanged
+            "indicators": [...],    # original items, normalised
             "warnings": [
                 {
                     "title": "血压异常预警",
-                    "tip": "建议低盐饮食，规律监测血压",   # ≤20 chars
+                    "tip": "建议低盐饮食，规律监测血压",
                     "indicator_indices": [0, 1]
                 },
                 ...
             ]
         }
+
+    Indicators are grouped into warnings by ``clinical_note`` field.
+    If ``clinical_note`` is missing, a best-effort inference from the
+    indicator name is performed.
     """
     raw = sr.get("abnormal_indicators", [])
     if not isinstance(raw, list) or not raw:
         return
 
+    # Keyword → clinical_note fallback when field is missing
+    _NAME_TO_NOTE = {
+        "收缩压": "高血压", "舒张压": "高血压",
+        "血糖": "血糖异常", "糖化": "血糖异常",
+        "胆固醇": "血脂异常", "甘油三酯": "血脂异常", "脂蛋白": "血脂异常",
+        "尿酸": "高尿酸",
+        "BMI": "BMI≥24", "腰围": "BMI≥24",
+    }
+
     # Group by clinical_note
     groups: Dict[str, list[int]] = {}  # clinical_note → [indicator_index, ...]
     for i, item in enumerate(raw):
-        note = item.get("clinical_note", "") if isinstance(item, dict) else ""
+        if not isinstance(item, dict):
+            continue
+        note = item.get("clinical_note", "")
+        if not note:
+            # Fallback: infer from indicator name
+            name = item.get("name", item.get("indicator", ""))
+            for kw, cn in _NAME_TO_NOTE.items():
+                if kw in name:
+                    note = cn
+                    break
         if note:
             groups.setdefault(note, []).append(i)
 
@@ -733,7 +756,7 @@ def transform_abnormal_indicators(sr: Dict[str, Any]) -> None:
         })
         warnings.append({
             "title": template["title"],
-            "tip": template["tip"][:20],
+            "tip": template["tip"],
             "indicator_indices": indices,
         })
 

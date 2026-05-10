@@ -108,6 +108,58 @@ async def _get_health_data_from_pingan(party_id: str) -> Optional[Dict[str, Any]
         return None
 
 
+def _format_modules_to_markdown(modules: Dict[str, Any]) -> str:
+    """Format skill modules dict into structured markdown report for SSE streaming.
+
+    Each module value may be:
+    - str: pre-formatted markdown, output directly
+    - dict/list: rendered via generic recursive formatting
+    """
+    lines = []
+
+    def _format_value(val: Any, indent: int = 0) -> None:
+        """Recursively format a value into lines."""
+        prefix = "  " * indent
+        if isinstance(val, str):
+            lines.append(f"{prefix}{val}")
+        elif isinstance(val, list):
+            for item in val:
+                if isinstance(item, str):
+                    lines.append(f"{prefix}- {item}")
+                elif isinstance(item, dict):
+                    parts = [f"{v}" for v in item.values() if isinstance(v, (str, int, float))]
+                    if parts:
+                        lines.append(f"{prefix}- {' | '.join(str(p) for p in parts)}")
+                    else:
+                        for k, v in item.items():
+                            _format_value(v, indent + 1)
+                else:
+                    lines.append(f"{prefix}- {item}")
+        elif isinstance(val, dict):
+            for k, v in val.items():
+                label = k.replace("_", " ").title()
+                if isinstance(v, (str, int, float)):
+                    lines.append(f"{prefix}- **{label}**: {v}")
+                elif isinstance(v, (list, dict)):
+                    lines.append(f"{prefix}**{label}:**")
+                    _format_value(v, indent + 1)
+                else:
+                    lines.append(f"{prefix}- **{label}**: {v}")
+
+    for section_name, section_content in modules.items():
+        if not section_content:
+            continue
+        if isinstance(section_content, str):
+            lines.append(section_content)
+            lines.append("")
+        else:
+            _format_value(section_content)
+            lines.append("")
+
+    report = "\n".join(lines)
+    return report if report.strip() else "评估完成，但未生成报告内容。"
+
+
 def _build_health_report(sr: Dict[str, Any]) -> str:
     """Build a formatted health assessment report from structured_result.
 
@@ -590,8 +642,13 @@ async def chat_stream(
             intent = agent_state.intent.value if agent_state.intent else "chat"
             confidence = agent_state.confidence or 0.0
 
-            # Build report from structured_result if available, otherwise use LLM response
-            if structured_result and structured_result.get("population_classification", {}).get("primary_category") not in ("", None):
+            # Build report: prefer modules markdown for package assessment, then structured_result report
+            so = getattr(agent_state, 'structured_output', None)
+            if isinstance(so, dict) and so.get("modules"):
+                # Use skill raw modules markdown (structured markdown for SSE)
+                full_response = _format_modules_to_markdown(so["modules"])
+                logger.info("Using modules-based markdown as response")
+            elif structured_result and structured_result.get("population_classification", {}).get("primary_category") not in ("", None):
                 full_response = _build_health_report(structured_result)
                 logger.info("Using structured report as response")
             else:

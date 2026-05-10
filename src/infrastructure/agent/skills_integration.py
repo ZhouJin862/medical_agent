@@ -346,29 +346,48 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
         tasks = [_run_insight(s) for s in _INSIGHT_SKILLS]
         results = await asyncio.gather(*tasks)
 
-        # Build merged structured_output
+        # Build merged structured_output (modules + structured_result)
         all_modules = {}
+        all_structured_results = []  # Collect structured_result from each skill
         for skill_name, result, error in results:
             if error or not result:
                 continue
             # Extract structured_output from result
             structured = result.get("structured_output") or result.get("final_output") or {}
-            if isinstance(structured, dict) and "modules" in structured:
-                modules = structured["modules"]
-                for k, v in modules.items():
-                    if k in all_modules and isinstance(v, list) and isinstance(all_modules[k], list):
-                        all_modules[k].extend(v)
-                    else:
-                        all_modules[k] = v
+            if isinstance(structured, dict):
+                # Extract modules (for SSE markdown)
+                if "modules" in structured:
+                    modules = structured["modules"]
+                    for k, v in modules.items():
+                        if k in all_modules and isinstance(v, list) and isinstance(all_modules[k], list):
+                            all_modules[k].extend(v)
+                        else:
+                            all_modules[k] = v
+                # Extract structured_result (for assessment JSON)
+                sr = structured.get("structured_result")
+                if sr and isinstance(sr, dict):
+                    all_structured_results.append(sr)
+                    logger.debug(f"Phase 3 skill {skill_name}: extracted structured_result")
+            # Also check top-level structured_result (some skills put it there)
+            if result.get("structured_result") and isinstance(result["structured_result"], dict):
+                # Avoid duplicate if already extracted from structured_output
+                sr_from_result = result["structured_result"]
+                if sr_from_result not in all_structured_results:
+                    all_structured_results.append(sr_from_result)
+                    logger.debug(f"Phase 3 skill {skill_name}: extracted structured_result from top-level")
 
-        structured_result = {
-            "population_classification": population_result.get("population_classification", {}),
+        # Merge all structured_results into one combined result
+        population_classification = population_result.get("population_classification", {})
+        merged_sr = _merge_all_structured_results(all_structured_results, population_classification)
+
+        state.structured_output = {
+            "population_classification": merged_sr.get("population_classification", population_classification),
             "modules": all_modules,
+            "structured_result": merged_sr,
             "sport_target": selected_goal,
         }
-        state.structured_output = structured_result
-        state.final_response = json.dumps(structured_result, ensure_ascii=False)
-        logger.info(f"Package assessment Phase 3 complete: {len(results)} skills, {len(all_modules)} modules")
+        state.final_response = json.dumps(state.structured_output, ensure_ascii=False)
+        logger.info(f"Package assessment Phase 3 complete: {len(results)} skills, {len(all_modules)} modules, {len(all_structured_results)} structured_results")
         return True
 
     # ---- Phase 1: population-classification ----
@@ -494,6 +513,296 @@ async def _execute_single_skill_for_orchestration(
     except Exception as e:
         logger.error(f"Failed to execute skill {skill_name}: {e}")
         return None
+
+
+def _merge_all_structured_results(
+    structured_results: list,
+    population_classification: dict,
+) -> dict:
+    """Merge structured_result dicts from multiple skills into one combined result.
+
+    - Array fields (disease_prediction, abnormal_indicators, etc.) are concatenated.
+    - abnormal_indicators items are normalised to a unified schema.
+    - intervention_prescriptions are deduplicated by type (merging content lists).
+    - population_classification is taken from the dedicated skill result.
+    """
+    if not structured_results:
+        return {
+            "population_classification": population_classification or {
+                "primary_category": "健康",
+                "grouping_basis": [],
+            },
+            "recommended_data_collection": [],
+            "abnormal_indicators": [],
+            "disease_prediction": [],
+            "intervention_prescriptions": [],
+            "risk_warnings": [],
+        }
+
+    merged: Dict[str, Any] = {}
+    array_keys = [
+        "disease_prediction",
+        "abnormal_indicators",
+        "intervention_prescriptions",
+        "recommended_data_collection",
+        "risk_warnings",
+    ]
+
+    # Start with first structured_result as base
+    merged.update(structured_results[0])
+
+    # Concat array fields from remaining results
+    for key in array_keys:
+        primary_list = merged.get(key, [])
+        if not isinstance(primary_list, list):
+            primary_list = []
+        for extra in structured_results[1:]:
+            extra_list = extra.get(key, [])
+            if isinstance(extra_list, list):
+                primary_list.extend(extra_list)
+        merged[key] = primary_list
+
+    # --- Post-merge clean-up ---
+
+    # 1. Normalise + deduplicate abnormal_indicators
+    merged["abnormal_indicators"] = _deduplicate_indicators(
+        _normalise_indicators(merged.get("abnormal_indicators", []))
+    )
+
+    # 2. Deduplicate intervention_prescriptions by canonical type
+    merged["intervention_prescriptions"] = _deduplicate_prescriptions(
+        merged.get("intervention_prescriptions", [])
+    )
+
+    # 3. Deduplicate risk_warnings by title
+    merged["risk_warnings"] = _deduplicate_risk_warnings(merged.get("risk_warnings", []))
+
+    # 4. Use population_classification from dedicated skill
+    if population_classification:
+        merged["population_classification"] = population_classification
+
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Indicator normalisation
+# ---------------------------------------------------------------------------
+
+def _deduplicate_indicators(indicators: list) -> list:
+    """Remove duplicate indicators by normalised name.
+
+    Multiple skills may report the same indicator (e.g. 收缩压).
+    Keep the one with the richest field set (prefer format-A with severity/summary).
+    """
+    seen: Dict[str, dict] = {}  # normalised_name → best item
+    for item in indicators:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name", "").strip()
+        if not name:
+            continue
+        # Normalise key: strip parenthetical qualifiers for matching
+        # e.g. "总胆固醇(TC)" → "总胆固醇", "低密度脂蛋白胆固醇(LDL-C)" → "低密度脂蛋白"
+        key = name
+        for short, long in [
+            ("总胆固醇", "总胆固醇"), ("低密度脂蛋白", "低密度脂蛋白"),
+            ("高密度脂蛋白", "高密度脂蛋白"), ("甘油三酯", "甘油三酯"),
+        ]:
+            if long in name:
+                key = long
+                break
+        # Check if this name already tracked under a variant
+        matched_key = None
+        for existing_key in seen:
+            if key in existing_key or existing_key in key:
+                matched_key = existing_key
+                break
+        if matched_key is None:
+            matched_key = key
+        # Prefer item with more fields (format-A over format-B)
+        existing = seen.get(matched_key)
+        if existing is None or len(item) > len(existing):
+            seen[matched_key] = item
+        # If same field count, prefer one with severity="high" over "elevated"
+        elif existing.get("severity") == "elevated" and item.get("severity") == "high":
+            seen[matched_key] = item
+    return list(seen.values())
+
+
+def _deduplicate_risk_warnings(warnings: list) -> list:
+    """Remove duplicate risk_warnings by title, keeping the one with highest level."""
+    level_order = {"high": 0, "中高": 1, "medium": 2, "中危": 2, "low": 3, "低危": 3}
+    seen: Dict[str, dict] = {}  # title → best item
+    for w in warnings:
+        if not isinstance(w, dict):
+            continue
+        title = w.get("title", "")
+        if not title:
+            continue
+        existing = seen.get(title)
+        if existing is None:
+            seen[title] = w
+        else:
+            # Keep higher severity
+            cur_rank = level_order.get(existing.get("level", ""), 99)
+            new_rank = level_order.get(w.get("level", ""), 99)
+            if new_rank < cur_rank:
+                seen[title] = w
+    return list(seen.values())
+
+
+def _normalise_indicators(indicators: list) -> list:
+    """Normalise indicator items to a unified schema.
+
+    Skill scripts emit two formats:
+    - Format A (hypertension/obesity): {name, value, unit, reference, severity, summary}
+    - Format B (blood-sugar/lipid/uric-acid): {indicator, value, reference}
+
+    We convert everything to Format A, inferring ``clinical_note`` from the
+    indicator name so that ``transform_abnormal_indicators`` can later group
+    them into warnings.
+    """
+    # Keyword → clinical_note mapping for warning grouping
+    _NAME_TO_CLINICAL_NOTE = {
+        "收缩压": "高血压", "舒张压": "高血压", "血压": "高血压",
+        "空腹血糖": "血糖异常", "餐后血糖": "血糖异常", "糖化血红蛋白": "血糖异常",
+        "血糖": "血糖异常",
+        "总胆固醇": "血脂异常", "甘油三酯": "血脂异常", "低密度脂蛋白": "血脂异常",
+        "高密度脂蛋白": "血脂异常", "胆固醇": "血脂异常", "TC": "血脂异常",
+        "TG": "血脂异常", "LDL": "血脂异常", "HDL": "血脂异常",
+        "血尿酸": "高尿酸", "尿酸": "高尿酸",
+        "BMI": "BMI≥24", "体脂": "BMI≥24", "腰围": "BMI≥24",
+    }
+
+    normalised = []
+    for item in indicators:
+        if not isinstance(item, dict):
+            continue
+        # Already in Format A — just add clinical_note if missing
+        if "name" in item:
+            n = item.get("name", "")
+            note = item.get("clinical_note", "")
+            if not note:
+                for kw, cn in _NAME_TO_CLINICAL_NOTE.items():
+                    if kw in n:
+                        note = cn
+                        break
+            new_item = dict(item)
+            if note:
+                new_item["clinical_note"] = note
+            normalised.append(new_item)
+            continue
+        # Format B — convert to Format A
+        if "indicator" in item:
+            raw_name = item.get("indicator", "")
+            raw_value = item.get("value", "")
+            ref = item.get("reference", "")
+            # Parse numeric value + unit from "152.0 mmHg"
+            num_val = raw_value
+            unit = ""
+            if isinstance(raw_value, str):
+                parts = raw_value.strip().split(None, 1)
+                try:
+                    num_val = float(parts[0])
+                    unit = parts[1] if len(parts) > 1 else ""
+                except (ValueError, IndexError):
+                    num_val = raw_value
+            # Infer severity from name + value
+            severity = "elevated"
+            # Infer clinical_note
+            note = ""
+            for kw, cn in _NAME_TO_CLINICAL_NOTE.items():
+                if kw in raw_name:
+                    note = cn
+                    break
+            normalised.append({
+                "name": raw_name,
+                "value": num_val,
+                "unit": unit,
+                "reference": ref,
+                "severity": severity,
+                "summary": f"{raw_name}{raw_value}，偏高" if isinstance(raw_value, str) else f"{raw_name}{num_val}，偏高",
+                "clinical_note": note,
+            })
+            continue
+        # Unknown format — pass through
+        normalised.append(item)
+    return normalised
+
+
+# ---------------------------------------------------------------------------
+# Prescription deduplication
+# ---------------------------------------------------------------------------
+
+# Canonical type mapping: Chinese / English variants → canonical key
+_PRESCRIPTION_TYPE_MAP = {
+    "饮食": "diet", "diet": "diet",
+    "运动": "exercise", "exercise": "exercise",
+    "睡眠": "sleep", "sleep": "sleep",
+    "监测": "monitoring", "monitoring": "monitoring",
+    "药物": "medication", "药物治疗": "medication", "medication": "medication",
+    "用药": "medication",
+    "饮水": "hydration",
+}
+
+_PRESCRIPTION_TYPE_LABELS = {
+    "diet": "饮食处方",
+    "exercise": "运动处方",
+    "sleep": "睡眠处方",
+    "monitoring": "监测建议",
+    "medication": "用药建议",
+    "hydration": "饮水建议",
+    "other": "其他建议",
+}
+
+_PRESCRIPTION_PRIORITY = {"high": 0, "中": 1, "medium": 1, "低": 2, "low": 2}
+
+
+def _deduplicate_prescriptions(prescriptions: list) -> list:
+    """Merge prescriptions by canonical type, deduplicating content items."""
+    if not prescriptions:
+        return []
+
+    # Group by canonical type
+    by_type: Dict[str, dict] = {}  # canonical_type → {content: list, priority: str, title: str}
+    for p in prescriptions:
+        if not isinstance(p, dict):
+            continue
+        raw_type = p.get("type", "other")
+        canonical = _PRESCRIPTION_TYPE_MAP.get(raw_type, raw_type)
+        contents = p.get("content", [])
+        if isinstance(contents, str):
+            contents = [contents]
+        if canonical not in by_type:
+            by_type[canonical] = {"content": [], "priority": "medium", "title": ""}
+        # Extend content (dedupe by exact string match)
+        seen = set(by_type[canonical]["content"])
+        for c in contents:
+            if c not in seen:
+                by_type[canonical]["content"].append(c)
+                seen.add(c)
+        # Keep highest priority
+        cur_pri = _PRESCRIPTION_PRIORITY.get(by_type[canonical]["priority"], 1)
+        new_pri = _PRESCRIPTION_PRIORITY.get(p.get("priority", "medium"), 1)
+        if new_pri < cur_pri:
+            by_type[canonical]["priority"] = p.get("priority", "medium")
+        # Keep best title
+        if not by_type[canonical]["title"] or len(p.get("title", "")) > len(by_type[canonical]["title"]):
+            by_type[canonical]["title"] = p.get("title", "") or _PRESCRIPTION_TYPE_LABELS.get(canonical, canonical)
+
+    # Build sorted result (high → medium → low)
+    result = []
+    for canonical, data in sorted(
+        by_type.items(),
+        key=lambda kv: _PRESCRIPTION_PRIORITY.get(kv[1]["priority"], 1),
+    ):
+        result.append({
+            "type": canonical,
+            "title": data["title"] or _PRESCRIPTION_TYPE_LABELS.get(canonical, canonical),
+            "content": data["content"],
+            "priority": data["priority"],
+        })
+    return result
 
 
 def _extract_modules(result: Any) -> Optional[Dict]:
