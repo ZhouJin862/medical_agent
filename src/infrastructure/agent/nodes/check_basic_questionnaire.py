@@ -54,6 +54,7 @@ def map_questionnaire_answers_to_health_data(
         "weight-input": "weight",
         "disease-history": "diseaseLabels",
         "sport_target1": "sport_target",
+        "symptoms": "symptoms",
     }
 
     result: Dict[str, Any] = {}
@@ -82,6 +83,9 @@ def map_questionnaire_answers_to_health_data(
         # symptoms: [] → mark as answered (no symptoms)
         elif q_id == "symptoms" and isinstance(value, list) and len(value) == 0:
             result["symptoms"] = []
+        # symptoms: non-empty list → pass through
+        elif q_id == "symptoms" and isinstance(value, list) and len(value) > 0:
+            result["symptoms"] = value
     return result
 
 

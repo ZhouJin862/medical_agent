@@ -637,6 +637,16 @@ async def chat_stream(
             # Transform abnormal_indicators into indicators + warnings
             transform_abnormal_indicators(structured_result)
 
+            # LLM 生成个性化处方
+            try:
+                from src.domain.shared.services.prescription_generator import generate_prescriptions
+                if structured_result:
+                    structured_result["intervention_prescriptions"] = await generate_prescriptions(
+                        structured_result, health_data or {}
+                    )
+            except Exception as e:
+                logger.warning(f"Prescription generation failed in streaming, keeping script defaults: {e}")
+
             # Extract response and metadata from agent state
             skill_used = agent_state.suggested_skill
             intent = agent_state.intent.value if agent_state.intent else "chat"

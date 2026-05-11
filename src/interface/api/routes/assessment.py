@@ -332,6 +332,15 @@ async def run_assessment(request: AssessmentRequest):
     # 5.5 Transform abnormal_indicators into indicators + warnings structure
     transform_abnormal_indicators(structured_result)
 
+    # 5.6 LLM 生成个性化处方
+    try:
+        from src.domain.shared.services.prescription_generator import generate_prescriptions
+        structured_result["intervention_prescriptions"] = await generate_prescriptions(
+            structured_result, health_data or {}
+        )
+    except Exception as e:
+        logger.warning(f"Prescription generation failed, keeping script defaults: {e}")
+
     # 6. Build response
     response_data = {
         "party_id": request.party_id,

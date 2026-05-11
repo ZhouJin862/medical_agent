@@ -788,12 +788,20 @@ class ClaudeSkillsExecutor:
         if conversation_context:
             prompt_parts.append(f"\n# Conversation Context\n{conversation_context}\n")
 
-        # Instructions
+        # Instructions — tell LLM to follow skill's output format
         prompt_parts.append("\n# Instructions\n")
-        prompt_parts.append(
-            "Based on the skill instructions above, provide a helpful response "
-            "to the user. Follow the skill's workflow and recommendations."
-        )
+        # Check if skill specifies JSON output format
+        skill_content_lower = skill_def.content.lower() if skill_def.content else ""
+        if "输出格式" in skill_def.content or "output format" in skill_content_lower:
+            prompt_parts.append(
+                "Follow the skill's output format exactly. "
+                "Output ONLY the JSON specified in the skill, no extra text or markdown."
+            )
+        else:
+            prompt_parts.append(
+                "Based on the skill instructions above, provide a helpful response "
+                "to the user. Follow the skill's workflow and recommendations."
+            )
 
         return "\n".join(prompt_parts)
 

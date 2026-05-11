@@ -133,6 +133,21 @@ GROUP_THRESHOLDS = [
     (0,  "健康"),
 ]
 
+# Symptom frequency → numeric score
+SYMPTOM_SCORE_MAP = {
+    "never": 1,
+    "occasionally": 2,
+    "sometimes": 3,
+    "often": 4,
+    "always": 5,
+}
+
+# Threshold: total > 18 (avg > 2.0 for 9 questions) → 亚健康
+SUBHEALTH_SYMPTOM_THRESHOLD = 18
+
+# Total number of symptom sub-questions (unanswered ones default to "never"=1)
+SYMPTOM_QUESTION_COUNT = 9
+
 # Follow-up intervals by group
 FOLLOW_UP_MAP = {
     "健康": "每年",
@@ -148,6 +163,20 @@ RECOMMENDED_LABELS = {
     "tc": "总胆固醇", "tg": "甘油三酯", "ldl_c": "低密度脂蛋白",
     "hdl_c": "高密度脂蛋白", "uric_acid": "血尿酸", "bmi": "BMI",
     "alt": "谷丙转氨酶", "creatinine": "肌酐",
+}
+
+# Symptom value → Chinese label
+SYMPTOM_LABELS = {
+    "fatigue": "易疲劳", "mental_fatigue": "精神萎靡",
+    "stiffness": "肌肉/关节僵硬", "soreness": "肩颈腰酸痛",
+    "shortness_of_breath": "静坐时气短", "chest_congestion": "胸闷",
+    "poor_appetite": "食欲差", "memory_loss": "短期记忆障碍",
+    "slow_reaction": "反应迟钝",
+}
+
+SYMPTOM_FREQ_LABELS = {
+    "never": "从不", "occasionally": "偶尔",
+    "sometimes": "有时", "often": "经常", "always": "总是",
 }
 
 # Abnormal indicator reference ranges (for structured_result)
@@ -272,6 +301,10 @@ class PopulationClassifier:
             disease_labels = mh.get('disease_labels', [])
             if disease_labels:
                 patient_data['disease_labels'] = disease_labels
+            # Extract symptoms
+            symptoms = mh.get('symptoms', [])
+            if symptoms:
+                patient_data['symptoms'] = symptoms
             # Also check for individual disease flags
             for flag in ['has_diabetes', 'has_hypertension', 'has_hyperlipidemia',
                          'has_ckd', 'has_established_cvd', 'smoker']:
@@ -490,6 +523,42 @@ class PopulationClassifier:
 
         return score, basis
 
+    def _score_symptoms(self, patient_data: Dict[str, Any]) -> Tuple[int, List[str], List[str]]:
+        """Score symptoms questionnaire.
+
+        Returns (total_score, basis_list, symptom_names).
+        basis_list uses Chinese labels.
+        """
+        symptoms = patient_data.get("symptoms", [])
+        if not symptoms or not isinstance(symptoms, list):
+            return 0, [], []
+
+        total = 0
+        basis: List[str] = []
+        names: List[str] = []
+        scored_count = 0
+        for item in symptoms:
+            if isinstance(item, list) and len(item) >= 2:
+                name, freq = item[0], item[1]
+            elif isinstance(item, dict):
+                name = item.get("value", "")
+                freq = item.get("frequency", item.get("score", "never"))
+            else:
+                continue
+            scored_count += 1
+            score = SYMPTOM_SCORE_MAP.get(freq, 1)
+            total += score
+            if score >= 3:  # "sometimes" and above
+                label = SYMPTOM_LABELS.get(name, name)
+                freq_label = SYMPTOM_FREQ_LABELS.get(freq, freq)
+                basis.append(f"{label}({freq_label})")
+                names.append(name)
+        # Unanswered sub-questions default to "never" (score 1)
+        unanswered = SYMPTOM_QUESTION_COUNT - scored_count
+        if unanswered > 0:
+            total += unanswered  # each unanswered = 1 point ("never")
+        return total, basis, names
+
     def _determine_groups(self, total_score: int) -> Tuple[List[str], str]:
         """Map score to a list of applicable group names and the primary follow-up interval.
 
@@ -516,6 +585,72 @@ class PopulationClassifier:
     # ------------------------------------------------------------------
     # Output builders
     # ------------------------------------------------------------------
+
+    def _disease_staging_and_level(self, disease_zh: str, patient_data: Dict[str, Any]) -> Tuple[str, str]:
+        """Return (staging_type, risk_level) for a confirmed disease.
+
+        staging_type: e.g. "1级高血压", "2级高血压", "糖尿病"
+        risk_level: "低危" / "中危" / "高危"
+        """
+        if disease_zh == "高血压":
+            sbp = patient_data.get('sbp')
+            dbp = patient_data.get('dbp')
+            sv = float(sbp) if sbp else 0
+            dv = float(dbp) if dbp else 0
+            if sv >= 180 or dv >= 110:
+                return "3级高血压", "高危"
+            elif sv >= 160 or dv >= 100:
+                return "2级高血压", "高危"
+            elif sv >= 140 or dv >= 90:
+                # 1级高血压: risk depends on risk factors count
+                risk_factors = sum(1 for k in ['tc', 'ldl_c', 'fasting_glucose', 'hba1c']
+                                   if patient_data.get(k) and float(patient_data[k]) > 0)
+                level = "中危" if risk_factors >= 2 else "低危"
+                return "1级高血压", level
+            return "高血压", "中危"
+
+        if disease_zh == "糖尿病":
+            fg = patient_data.get('fasting_glucose')
+            hba1c = patient_data.get('hba1c')
+            fv = float(fg) if fg else 0
+            hv = float(hba1c) if hba1c else 0
+            if fv >= 11.1 or hv >= 9.0:
+                return "糖尿病", "高危"
+            elif fv >= 7.0 or hv >= 6.5:
+                return "糖尿病", "中危"
+            return "糖尿病", "中危"
+
+        if disease_zh == "高血脂":
+            tc = patient_data.get('tc')
+            tv = float(tc) if tc else 0
+            if tv >= 6.2:
+                return "高脂血症", "高危"
+            return "高脂血症", "中危"
+
+        # Default for other diseases
+        return disease_zh, "中危"
+
+    def _bp_risk_level(self, sbp_value: float, patient_data: Dict[str, Any]) -> str:
+        """Determine risk level for blood pressure based on combined risk factors."""
+        risk_factor_count = 0
+        fg = patient_data.get('fasting_glucose')
+        if fg and float(fg) >= 6.1:
+            risk_factor_count += 1
+        tc = patient_data.get('tc')
+        if tc and float(tc) >= 5.2:
+            risk_factor_count += 1
+        bmi = patient_data.get('bmi')
+        if bmi and float(bmi) >= 24:
+            risk_factor_count += 1
+        age = patient_data.get('age')
+        if age and int(age) >= 55:
+            risk_factor_count += 1
+
+        if risk_factor_count >= 3:
+            return "高危"
+        elif risk_factor_count >= 1:
+            return "中危"
+        return "低危"
 
     def _build_abnormal_indicators(self, patient_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Build abnormal indicators list for structured_result."""
@@ -670,15 +805,37 @@ class PopulationClassifier:
             if h and w and float(h) > 0:
                 patient_data['bmi'] = round(float(w) / ((float(h) / 100) ** 2), 1)
 
-        # Score indicators and diseases
-        ind_score, ind_basis, risk_indicators = self._score_indicators(patient_data)
+        # Score diseases first — chronic disease drives classification
         dis_score, dis_basis = self._score_diseases(patient_data)
-        total_score = ind_score + dis_score
-        all_basis = ind_basis + dis_basis
+        has_chronic_disease = dis_score > 0
 
-        # Determine groups (can be multiple)
-        groups, follow_up = self._determine_groups(total_score)
-        primary_group = groups[0]  # Highest-severity group
+        if has_chronic_disease:
+            # 1. Has chronic disease → 慢病
+            primary_group = "慢病"
+            all_basis = dis_basis
+            total_score = dis_score
+            risk_indicators = []
+            # Still score indicators for completeness
+            ind_score, ind_basis, risk_indicators = self._score_indicators(patient_data)
+            all_basis = ind_basis + dis_basis
+            total_score = ind_score + dis_score
+            symp_score, symp_basis, symp_names = 0, [], []
+        else:
+            # 2. No chronic disease → indicators + symptoms combined
+            ind_score, ind_basis, risk_indicators = self._score_indicators(patient_data)
+            symp_score, symp_basis, symp_names = self._score_symptoms(patient_data)
+
+            all_basis = ind_basis + symp_basis
+            total_score = ind_score + symp_score
+
+            if ind_score == 0 and symp_score <= SUBHEALTH_SYMPTOM_THRESHOLD:
+                primary_group = "健康"
+            else:
+                primary_group = "亚健康"
+
+        # Determine groups and follow-up
+        groups = [primary_group]
+        follow_up = FOLLOW_UP_MAP[primary_group]
 
         # Build output
         modules = {
@@ -701,12 +858,17 @@ class PopulationClassifier:
             })
 
         # Health grouping basis - derive from diseases and indicators
-        diseases = []
-        disease_risks = []
-        disease_staging = ""
-        risk_grading = primary_group
+        #
+        # grouping_basis schema:
+        #   disease: disease name (e.g. "高血压", "糖尿病") — never a group name
+        #   type:    clinical type/stage (e.g. "1级高血压", "糖尿病前期")
+        #   level:   risk level (e.g. "低危", "中危", "高危")
+        #   note:    human-readable summary
 
-        # From disease labels
+        confirmed_diseases: List[Dict[str, str]] = []  # {disease, type, level, note}
+        indicator_risks: List[Dict[str, str]] = []      # risks derived from abnormal indicators
+
+        # --- From disease_labels (confirmed diagnoses) ---
         disease_labels = patient_data.get('disease_labels', [])
         if isinstance(disease_labels, list):
             disease_map = {
@@ -718,45 +880,104 @@ class PopulationClassifier:
             }
             for label in disease_labels:
                 for key, zh_name in disease_map.items():
-                    if key in str(label).lower():
-                        diseases.append(zh_name)
+                    if key in str(label).lower() and not any(
+                        d["disease"] == zh_name for d in confirmed_diseases
+                    ):
+                        # Determine staging & risk level for this disease
+                        dtype, dlevel = self._disease_staging_and_level(zh_name, patient_data)
+                        confirmed_diseases.append({
+                            "disease": zh_name,
+                            "type": dtype,
+                            "level": dlevel,
+                            "note": f"{dtype}{dlevel}" if dtype else dlevel,
+                        })
 
-        # From indicator thresholds
+        # --- From abnormal indicators (no confirmed diagnosis) ---
         sbp = patient_data.get('sbp')
         if sbp and float(sbp) >= 140:
-            disease_risks.append("高血压")
-            if not disease_staging:
-                if float(sbp) >= 180: disease_staging = "3级高血压"
-                elif float(sbp) >= 160: disease_staging = "2级高血压"
-                else: disease_staging = "1级高血压"
+            if not any(d["disease"] == "高血压" for d in confirmed_diseases):
+                if float(sbp) >= 180: dtype = "3级高血压"
+                elif float(sbp) >= 160: dtype = "2级高血压"
+                else: dtype = "1级高血压"
+                dlevel = self._bp_risk_level(float(sbp), patient_data)
+                indicator_risks.append({
+                    "disease": "高血压",
+                    "type": dtype,
+                    "level": dlevel,
+                    "note": f"{dtype}{dlevel}",
+                })
+
         fg = patient_data.get('fasting_glucose')
         if fg and float(fg) >= 6.1:
-            disease_risks.append("血糖异常")
-            if not disease_staging:
-                if float(fg) >= 7.0: disease_staging = "糖尿病"
-                else: disease_staging = "糖尿病前期"
+            if not any(d["disease"] == "糖尿病" for d in confirmed_diseases):
+                if float(fg) >= 7.0:
+                    dtype = "糖尿病"
+                    dlevel = "高危"
+                else:
+                    dtype = "糖尿病前期"
+                    dlevel = "低危"
+                indicator_risks.append({
+                    "disease": "血糖异常",
+                    "type": dtype,
+                    "level": dlevel,
+                    "note": f"{dtype}{dlevel}",
+                })
+
         tc = patient_data.get('tc')
         if tc and float(tc) >= 5.2:
-            disease_risks.append("高胆固醇")
+            if not any(d["disease"] == "高血脂" for d in confirmed_diseases):
+                dlevel = "高危" if float(tc) >= 6.2 else "中危" if float(tc) >= 5.7 else "低危"
+                indicator_risks.append({
+                    "disease": "血脂异常",
+                    "type": "高胆固醇血症" if float(tc) >= 6.2 else "临界高胆固醇",
+                    "level": dlevel,
+                    "note": f"总胆固醇{tc}{dlevel}",
+                })
+
         bmi = patient_data.get('bmi')
         if bmi:
             bv = float(bmi)
-            if bv >= 28: disease_risks.append("肥胖")
-            elif bv >= 24: disease_risks.append("超重")
-        if not diseases:
-            diseases = ["暂无确诊疾病"]
-        if not disease_risks:
-            disease_risks = ["暂无明显风险"]
+            if bv >= 28 and not any(d["disease"] == "肥胖" for d in confirmed_diseases):
+                indicator_risks.append({
+                    "disease": "肥胖",
+                    "type": "肥胖",
+                    "level": "中危",
+                    "note": f"BMI {bmi}肥胖",
+                })
+            elif bv >= 24 and not any(d["disease"] == "超重" for d in confirmed_diseases):
+                indicator_risks.append({
+                    "disease": "超重",
+                    "type": "超重",
+                    "level": "低危",
+                    "note": f"BMI {bmi}超重",
+                })
+
+        # Build grouping_basis: confirmed diseases first, then indicator risks, then symptoms
+        grouping_basis = confirmed_diseases + indicator_risks
+
+        # Add symptom-driven basis when symptoms are the main reason for 亚健康 classification
+        if symp_basis and symp_score > SUBHEALTH_SYMPTOM_THRESHOLD:
+            symptom_note = "、".join(symp_basis)
+            grouping_basis.append({
+                "disease": "亚健康症状",
+                "type": "功能性问题",
+                "level": "低危" if symp_score <= 25 else "中危",
+                "note": symptom_note,
+            })
+
+        # If no diseases and no indicator risks → truly healthy
+        if not grouping_basis:
+            grouping_basis = [{
+                "disease": "",
+                "type": "",
+                "level": "",
+                "note": "所有指标正常",
+            }]
 
         structured_result = {
             "population_classification": {
                 "primary_category": primary_group,
-                "grouping_basis": [{
-                    "disease": d if d != "暂无确诊疾病" else "",
-                    "type": disease_staging if d != "暂无确诊疾病" else "",
-                    "level": risk_grading or "",
-                    "note": f"{disease_staging}{risk_grading or ''}" if d != "暂无确诊疾病" and disease_staging else (risk_grading or ""),
-                } for d in (diseases if diseases and diseases != ["暂无确诊疾病"] else [primary_group])],
+                "grouping_basis": grouping_basis,
             },
             "recommended_data_collection": self._build_recommended_data(patient_data),
             "abnormal_indicators": self._build_abnormal_indicators(patient_data),

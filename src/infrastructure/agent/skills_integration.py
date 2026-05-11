@@ -310,7 +310,6 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
     """
     import asyncio
     from src.domain.questionnaire.services.questionnaire_service import QuestionnaireService
-    from src.infrastructure.agent.skill_md_executor import execute_skill_via_skill_md
 
     health_data = state.ping_an_health_data or {}
 
@@ -434,21 +433,44 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
         "goal_pool": goal_pool,
     }
 
-    # Execute goal-recommender script directly (sync, wrap in executor)
+    # Execute via ClaudeSkillsExecutor — supports both script and LLM paths
     recommended_goals = []
     try:
-        loop = asyncio.get_event_loop()
-        goal_result = await loop.run_in_executor(
-            None,
-            lambda: execute_skill_via_skill_md("goal-recommendation", goal_input),
+        executor = ClaudeSkillsExecutor(session)
+        patient_context = None
+        if state.patient_context:
+            patient_context = {
+                "basic_info": state.patient_context.basic_info,
+                "vital_signs": state.patient_context.vital_signs,
+                "medical_history": state.patient_context.medical_history,
+            }
+        goal_result = await executor.execute_skill(
+            skill_name="goal-recommendation",
+            user_input=json.dumps(goal_input, ensure_ascii=False),
+            patient_context=patient_context,
         )
         if goal_result and isinstance(goal_result, dict):
-            # SkillWorkflowExecutor wraps script output in "final_output"
-            final_output = goal_result.get("final_output")
-            if isinstance(final_output, dict):
-                recommended_goals = final_output.get("recommended_goals", [])
+            # Workflow path: structured_output / final_output
+            structured = goal_result.get("structured_output") or goal_result.get("final_output") or {}
+            if isinstance(structured, dict):
+                recommended_goals = structured.get("recommended_goals", [])
+            # Direct key in result
             if not recommended_goals:
                 recommended_goals = goal_result.get("recommended_goals", [])
+            # LLM path: response is a string — try parse JSON from it
+            if not recommended_goals:
+                response_str = goal_result.get("response", "")
+                if isinstance(response_str, str) and response_str.strip().startswith("{"):
+                    try:
+                        parsed = json.loads(response_str)
+                        recommended_goals = parsed.get("recommended_goals", [])
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                elif isinstance(response_str, str) and response_str.strip().startswith("["):
+                    try:
+                        recommended_goals = json.loads(response_str)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
     except Exception as e:
         logger.warning(f"Goal-recommendation skill failed: {e}")
 
