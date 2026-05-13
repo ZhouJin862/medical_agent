@@ -98,13 +98,20 @@ async def run_assessment(request: AssessmentRequest):
 
     # Restore previously collected data for this session (multi-turn)
     # Skip for re_assessment — start fresh
+    prev_data = {}
     if request.session_id and not request.re_assessment:
         prev_data = _load_session_data(request.session_id)
         if prev_data:
             if not health_data:
                 health_data = {}
-            # Previous session data as base, current request overrides
+            # Previous session data as base, current Ping An data overrides
             health_data = {**prev_data, **health_data}
+            # Protect user-submitted answers from being blanked by Ping An API
+            # (e.g. Ping An returns gender="" but user already submitted gender="male")
+            for k, v in prev_data.items():
+                if v is not None and v != "" and v != []:
+                    if k in health_data and (health_data[k] is None or health_data[k] == "" or health_data[k] == []):
+                        health_data[k] = v
 
     if request.questionnaire_answers:
         from src.infrastructure.agent.nodes.check_basic_questionnaire import map_questionnaire_answers_to_health_data
@@ -160,6 +167,7 @@ async def run_assessment(request: AssessmentRequest):
                     suggested_skill="package@assessment",
                     session_id=session_id,
                     require_basic_questionnaire=True,
+                    is_re_assessment=request.re_assessment,
                 ),
                 timeout=120.0,
             )
@@ -178,6 +186,7 @@ async def run_assessment(request: AssessmentRequest):
                     suggested_skill=first_skill,
                     session_id=session_id,
                     require_basic_questionnaire=True,
+                    is_re_assessment=request.re_assessment,
                 ),
                 timeout=120.0,
             )
@@ -230,6 +239,11 @@ async def run_assessment(request: AssessmentRequest):
         questions = so.get("questions", [])
 
         if request.re_assessment:
+            # Clear seen intro pages so re-assessment starts fresh
+            if health_data:
+                health_data.pop("_seen_intro_pages", None)
+                _save_session_data(session_id, health_data)
+
             # Return ALL questions in order for re-assessment
             all_questions = _build_all_questions(questions)
             return JSONResponse(content={
@@ -251,7 +265,19 @@ async def run_assessment(request: AssessmentRequest):
             })
 
         # Normal flow: return single current question
-        current_q = _build_current_question(questions, recommended)
+        current_q = _build_current_question(
+            questions, recommended, so.get("questionnaire_type"),
+            is_re_assessment=request.re_assessment,
+            health_data=health_data,
+        )
+
+        # Record seen intro pages so we don't re-send them on next request
+        if current_q and current_q.get("type") == "intro":
+            seen_list = health_data.setdefault("_seen_intro_pages", []) if health_data else []
+            intro_id = current_q.get("id")
+            if intro_id and intro_id not in seen_list:
+                seen_list.append(intro_id)
+                _save_session_data(session_id, health_data or {})
 
         return JSONResponse(content={
             "code": 200,
@@ -289,6 +315,7 @@ async def run_assessment(request: AssessmentRequest):
                 "skill": request.skill,
                 "session_id": session_id,
                 "status": "goal_selection",
+                "questionnaire_type": so.get("questionnaire_type"),
                 "current_question": so.get("current_question"),
                 "population_classification": so.get("population_classification"),
                 "metadata": {
@@ -384,12 +411,12 @@ def _log_skill_perf(skill_name: str, elapsed_ms: int, state):
 def _build_all_questions(questions: list) -> list:
     """Build the full ordered question list for re-assessment.
 
-    Filters out intro-type questions and enriches each with navigation metadata.
+    Includes intro-type pages and enriches each with navigation metadata.
     """
-    data_questions = [q for q in questions if q.get("type") not in ("intro",)]
-    total_qs = len(data_questions)
+    all_pages = questions  # Include intro pages
+    total_qs = len(all_pages)
     result = []
-    for i, q in enumerate(data_questions):
+    for i, q in enumerate(all_pages):
         item = {
             "id": q.get("id"),
             "type": q.get("type"),
@@ -403,10 +430,15 @@ def _build_all_questions(questions: list) -> list:
             "currentIndex": i + 1,
             "totalQs": total_qs,
         }
+        # Include intro-specific fields
+        if q.get("behavior"):
+            item["behavior"] = q.get("behavior")
+        if q.get("introImageSrc"):
+            item["introImageSrc"] = q.get("introImageSrc")
         if i > 0:
-            item["prevQuestionId"] = data_questions[i - 1].get("id")
+            item["prevQuestionId"] = all_pages[i - 1].get("id")
         if i < total_qs - 1:
-            item["nextQuestionId"] = data_questions[i + 1].get("id")
+            item["nextQuestionId"] = all_pages[i + 1].get("id")
         result.append(item)
     return result
 
@@ -414,60 +446,79 @@ def _build_all_questions(questions: list) -> list:
 def _build_current_question(
     questions: list,
     recommended: list,
+    questionnaire_type: str | None = None,
+    is_re_assessment: bool = False,
+    health_data: dict | None = None,
 ) -> Optional[Dict[str, Any]]:
-    """Build a full current_question object for the first missing required question.
+    """Build a full current_question object including intro pages.
 
     Takes the complete question definition from the ``questions`` array (which
     includes type, componentType, options, etc.) and enriches it with
     navigation metadata (hasNext, hasPrev, currentIndex, totalQs).
+
+    When ``is_re_assessment`` is True, starts from index 0 (first intro page).
+    Otherwise, finds the first missing data question and walks backwards to
+    include its preceding intro page.
     """
     if not questions:
         return None
 
-    # Fallback: no recommended but have questions → use first question
-    if not recommended:
-        target_id = questions[0].get("id")
+    # Navigation based on ALL pages (intro + data)
+    all_pages = questions
+    total_pages = len(all_pages)
+
+    if is_re_assessment:
+        # Start from the very first page
+        target_index = 0
     else:
-        target_id = recommended[0].get("id")
-    if not target_id:
-        return recommended[0]
+        # Find the first recommended (missing) data question
+        if recommended:
+            target_id = recommended[0].get("id")
+        else:
+            target_id = all_pages[0].get("id")
+        if not target_id:
+            return recommended[0] if recommended else None
 
-    # Build a lookup for quick access
-    q_by_id = {q.get("id"): q for q in questions if isinstance(q, dict)}
+        # Find the target question's position in all_pages
+        target_index = next(
+            (i for i, p in enumerate(all_pages) if isinstance(p, dict) and p.get("id") == target_id),
+            0,
+        )
+        # Walk backwards to include preceding intro pages that haven't been seen yet
+        seen_intros = set((health_data or {}).get("_seen_intro_pages", []))
+        while (target_index > 0
+               and all_pages[target_index - 1].get("type") == "intro"
+               and all_pages[target_index - 1].get("id") not in seen_intros):
+            target_index -= 1
 
-    q = q_by_id.get(target_id)
-    if not q:
-        return recommended[0]
+    page = all_pages[target_index]
 
-    # Navigation: position among data questions
-    data_questions = [q for q in questions if q.get("type") not in ("intro",)]
-    total_qs = len(data_questions)
-
-    current_index = 0
-    for i, dq in enumerate(data_questions):
-        if dq.get("id") == target_id:
-            current_index = i
-            break
-
-    result = {
-        "id": q.get("id"),
-        "type": q.get("type"),
-        "title": q.get("title", ""),
-        "componentType": q.get("componentType", q.get("component_type")),
-        "required": q.get("required", False),
-        "options": q.get("options"),
+    result: Dict[str, Any] = {
+        "questionnaire_type": questionnaire_type,
+        "id": page.get("id"),
+        "type": page.get("type"),
+        "title": page.get("title", ""),
+        "componentType": page.get("componentType", page.get("component_type")),
+        "required": page.get("required", False),
+        "options": page.get("options"),
         "showNavigation": True,
-        "hasNext": current_index < total_qs - 1,
-        "hasPrev": current_index > 0,
-        "currentIndex": current_index + 1,
-        "totalQs": total_qs,
+        "hasNext": target_index < total_pages - 1,
+        "hasPrev": target_index > 0,
+        "currentIndex": target_index + 1,
+        "totalQs": total_pages,
     }
 
-    # Include next/prev question IDs if available
-    if current_index > 0:
-        result["prevQuestionId"] = data_questions[current_index - 1].get("id")
-    if current_index < total_qs - 1:
-        result["nextQuestionId"] = data_questions[current_index + 1].get("id")
+    # Include intro-specific fields
+    if page.get("behavior"):
+        result["behavior"] = page.get("behavior")
+    if page.get("introImageSrc"):
+        result["introImageSrc"] = page.get("introImageSrc")
+
+    # Include next/prev page IDs
+    if target_index > 0:
+        result["prevQuestionId"] = all_pages[target_index - 1].get("id")
+    if target_index < total_pages - 1:
+        result["nextQuestionId"] = all_pages[target_index + 1].get("id")
 
     return result
 

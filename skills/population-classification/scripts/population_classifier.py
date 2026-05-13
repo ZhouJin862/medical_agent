@@ -753,31 +753,78 @@ class PopulationClassifier:
     # Main assess
     # ------------------------------------------------------------------
 
-    def _build_risk_warnings(self, group: str, patient_data: dict) -> List[Dict[str, Any]]:
+    def _build_risk_warnings(self, group: str, patient_data: dict, score: int = 0, basis: list = None) -> List[Dict[str, Any]]:
         """Build risk warnings based on group and indicators."""
         warnings = []
+
+        # Follow-up interval by group
+        follow_up_map = {
+            "重症": "每1-2周", "慢病": "每1-3个月",
+            "亚健康": "每3-6个月", "健康": "每年",
+        }
+        follow_up = follow_up_map.get(group, "每3-6个月")
+
+        # Grouping basis for prediction
+        group_basis = basis or []
+        basis_notes = [b.get("note", b.get("disease", "")) for b in group_basis if isinstance(b, dict)]
+
         sbp = patient_data.get('sbp') or patient_data.get('systolic_bp')
         if sbp:
             try:
                 sv = float(sbp)
+                key_factors = []
                 if sv >= 180:
-                    warnings.append({"title": "血压严重偏高", "description": f"收缩压{sbp}mmHg，需紧急就医", "level": "critical"})
+                    key_factors.append("3级高血压")
+                elif sv >= 160:
+                    key_factors.append("2级高血压")
                 elif sv >= 140:
-                    warnings.append({"title": "血压偏高", "description": f"收缩压{sbp}mmHg，建议规范治疗", "level": "medium"})
+                    key_factors.append("1级高血压")
+                key_factors.extend(b for b in basis_notes if b)
+                prediction = {
+                    "risk_type": "population_classification",
+                    "timeframe": "",
+                    "risk_level": group,
+                    "key_factors": key_factors[:5] if key_factors else [group],
+                    "follow_up": follow_up,
+                }
+                if sv >= 180:
+                    warnings.append({"title": "血压严重偏高", "description": f"收缩压{sbp}mmHg，需紧急就医", "level": "critical", "prediction": prediction})
+                elif sv >= 140:
+                    warnings.append({"title": "血压偏高", "description": f"收缩压{sbp}mmHg，建议规范治疗", "level": "medium", "prediction": prediction})
             except (ValueError, TypeError):
                 pass
         bmi = patient_data.get('bmi')
         if bmi:
             try:
                 bv = float(bmi)
+                key_factors = []
                 if bv >= 28:
-                    warnings.append({"title": "肥胖预警", "description": f"BMI {bmi}，建议减重干预", "level": "high"})
+                    key_factors.append("肥胖")
                 elif bv >= 24:
-                    warnings.append({"title": "超重提醒", "description": f"BMI {bmi}，建议控制体重", "level": "low"})
+                    key_factors.append("超重")
+                key_factors.extend(b for b in basis_notes if b)
+                prediction = {
+                    "risk_type": "population_classification",
+                    "timeframe": "",
+                    "risk_level": group,
+                    "key_factors": key_factors[:5] if key_factors else [group],
+                    "follow_up": follow_up,
+                }
+                if bv >= 28:
+                    warnings.append({"title": "肥胖预警", "description": f"BMI {bmi}，建议减重干预", "level": "high", "prediction": prediction})
+                elif bv >= 24:
+                    warnings.append({"title": "超重提醒", "description": f"BMI {bmi}，建议控制体重", "level": "low", "prediction": prediction})
             except (ValueError, TypeError):
                 pass
         if group in ("慢病", "重症"):
-            warnings.append({"title": "慢病风险提示", "description": f"当前分组为{group}，建议定期复查和规范管理", "level": "high" if group == "重症" else "medium"})
+            group_pred = {
+                "risk_type": "population_classification",
+                "timeframe": "",
+                "risk_level": group,
+                "key_factors": basis_notes[:5] if basis_notes else [group],
+                "follow_up": follow_up,
+            }
+            warnings.append({"title": "慢病风险提示", "description": f"当前分组为{group}，建议定期复查和规范管理", "level": "high" if group == "重症" else "medium", "prediction": group_pred})
         return warnings
 
     def assess(self, input_data: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -982,7 +1029,7 @@ class PopulationClassifier:
             "recommended_data_collection": self._build_recommended_data(patient_data),
             "abnormal_indicators": self._build_abnormal_indicators(patient_data),
             "intervention_prescriptions": self._build_intervention_prescriptions(primary_group),
-            "risk_warnings": self._build_risk_warnings(primary_group, patient_data),
+            "risk_warnings": self._build_risk_warnings(primary_group, patient_data, total_score, grouping_basis),
         }
 
         return {

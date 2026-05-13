@@ -351,17 +351,68 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
 
     # Risk warnings
     risk_warnings = []
+
+    # Build prediction data
+    gout_risk_level = risk_data.get('gout_risk_level', '')
+    kidney = input_data.get('kidney_assessment', {})
+    egfr = kidney.get('egfr')
+    has_gout = risk_data.get('has_gout', False)
+
+    follow_up_map = {
+        '高': '每1-3个月', '中': '每3-6个月', '低': '每6-12个月',
+    }
+    follow_up = follow_up_map.get(gout_risk_level, '每3-6个月')
+
+    key_factors = []
     if ua:
         try:
             uv = float(ua)
             if uv >= 480:
-                risk_warnings.append({"title": "尿酸严重偏高", "description": f"血尿酸{ua}μmol/L，痛风风险显著增加", "level": "high"})
+                key_factors.append("重度高尿酸血症")
             elif uv >= 420:
-                risk_warnings.append({"title": "尿酸偏高", "description": f"血尿酸{ua}μmol/L，需关注饮食控制", "level": "medium"})
+                key_factors.append("高尿酸血症")
         except (ValueError, TypeError):
             pass
-    if risk_data.get('has_gout'):
-        risk_warnings.append({"title": "痛风风险", "description": "已存在痛风症状，需控制尿酸水平预防发作", "level": "high"})
+    if has_gout:
+        key_factors.append("已确诊痛风")
+    if egfr:
+        try:
+            ev = float(egfr)
+            if ev < 60:
+                key_factors.append(f"肾功能下降(eGFR {egfr})")
+        except (ValueError, TypeError):
+            pass
+
+    prediction = None
+    if key_factors:
+        prediction = {
+            "risk_type": "gout",
+            "timeframe": "1年",
+            "risk_level": gout_risk_level or risk_grade,
+            "key_factors": key_factors,
+            "follow_up": follow_up,
+        }
+
+    if ua:
+        try:
+            uv = float(ua)
+            if uv >= 480:
+                desc = f"血尿酸{ua}μmol/L，痛风风险显著增加"
+                if prediction:
+                    desc += f"；建议{follow_up}复查"
+                risk_warnings.append({"title": "尿酸严重偏高", "description": desc, "level": "high", "prediction": prediction})
+            elif uv >= 420:
+                desc = f"血尿酸{ua}μmol/L，需关注饮食控制"
+                if prediction:
+                    desc += f"；建议{follow_up}复查"
+                risk_warnings.append({"title": "尿酸偏高", "description": desc, "level": "medium", "prediction": prediction})
+        except (ValueError, TypeError):
+            pass
+    if has_gout:
+        gout_desc = "已存在痛风症状，需控制尿酸水平预防发作"
+        if prediction:
+            gout_desc += f"；建议{follow_up}复查"
+        risk_warnings.append({"title": "痛风风险", "description": gout_desc, "level": "high", "prediction": prediction})
 
     return {
         "population_classification": population_classification,

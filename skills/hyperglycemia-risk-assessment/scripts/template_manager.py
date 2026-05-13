@@ -472,13 +472,52 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
 
     # Risk warnings
     risk_warnings = []
+
+    # Build prediction data
+    three_year_risk = risk_data.get('three_year_risk')
+    insulin_resistance = input_data.get('insulin_resistance', {})
+    has_insulin_resistance = insulin_resistance.get('has_resistance', False)
+    glucose_status = risk_data.get('glucose_status', '')
+    risk_level = overall_risk.get('risk_level', '')
+
+    follow_up_map = {
+        '高风险': '每1-3个月', '中风险': '每3-6个月', '低风险': '每年',
+    }
+    follow_up = follow_up_map.get(risk_level, '每3-6个月')
+
+    key_factors = []
+    if glucose_status == '糖尿病':
+        key_factors.append("已确诊糖尿病")
+    elif glucose_status == '糖尿病前期':
+        key_factors.append("糖尿病前期")
+    if has_insulin_resistance:
+        key_factors.append("胰岛素抵抗")
+    if three_year_risk and isinstance(three_year_risk, (int, float)):
+        key_factors.append(f"3年转化风险{three_year_risk}%")
+
+    prediction = None
+    if key_factors:
+        prediction = {
+            "risk_type": "diabetes_conversion",
+            "timeframe": "3年",
+            "risk_level": risk_level or glucose_status,
+            "key_factors": key_factors,
+            "follow_up": follow_up,
+        }
+
     if fg:
         try:
             fv = float(fg)
             if fv >= 11.1:
-                risk_warnings.append({"title": "血糖严重偏高", "description": f"空腹血糖{fg}mmol/L，提示显性糖尿病，需积极治疗", "level": "high"})
+                desc = f"空腹血糖{fg}mmol/L，提示显性糖尿病，需积极治疗"
+                if prediction:
+                    desc += f"；3年糖尿病转化风险显著，建议{follow_up}复查"
+                risk_warnings.append({"title": "血糖严重偏高", "description": desc, "level": "high", "prediction": prediction})
             elif fv >= 7.0:
-                risk_warnings.append({"title": "血糖偏高", "description": f"空腹血糖{fg}mmol/L，提示糖尿病，建议规范治疗", "level": "medium"})
+                desc = f"空腹血糖{fg}mmol/L，提示糖尿病，建议规范治疗"
+                if prediction:
+                    desc += f"；建议{follow_up}复查"
+                risk_warnings.append({"title": "血糖偏高", "description": desc, "level": "medium", "prediction": prediction})
         except (ValueError, TypeError):
             pass
 

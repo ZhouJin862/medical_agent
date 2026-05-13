@@ -55,6 +55,7 @@ def map_questionnaire_answers_to_health_data(
         "disease-history": "diseaseLabels",
         "sport_target1": "sport_target",
         "symptoms": "symptoms",
+        "special_disease": "diseaseLabels",
     }
 
     result: Dict[str, Any] = {}
@@ -74,6 +75,13 @@ def map_questionnaire_answers_to_health_data(
                 if labels:
                     result["diseaseLabels"] = labels
                     result["disease_severity"] = severity_map
+                continue
+            # special_disease: ["胃癌", ...] → append to diseaseLabels
+            if q_id == "special_disease" and isinstance(value, list):
+                existing = result.get("diseaseLabels", [])
+                if not isinstance(existing, list):
+                    existing = []
+                result["diseaseLabels"] = existing + [s for s in value if isinstance(s, str)]
                 continue
             result[health_key] = value
         # disease-history: [] → mark as "answered_empty" to distinguish from "not answered"
@@ -138,6 +146,46 @@ def _build_missing_response(
     )
 
 
+def _include_intro_for_questions(
+    all_questions: List[Dict[str, Any]],
+    target_data_questions: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return intro pages + target data questions from all_questions.
+
+    Finds the earliest target data question, then walks backwards to include
+    any intro pages that precede it. Returns the intro pages + all target data
+    questions in their original order.
+    """
+    if not target_data_questions:
+        return []
+
+    target_ids = {q.get("id") for q in target_data_questions}
+    all_ids = {q.get("id") for q in all_questions}
+
+    # If targets not in all_questions, return as-is
+    if not target_ids & all_ids:
+        return list(target_data_questions)
+
+    # Find the earliest target question index
+    earliest_idx = len(all_questions)
+    for i, q in enumerate(all_questions):
+        if q.get("id") in target_ids:
+            earliest_idx = i
+            break
+
+    # Walk backwards from earliest target to find intro pages
+    start_idx = earliest_idx
+    while start_idx > 0 and all_questions[start_idx - 1].get("type") == "intro":
+        start_idx -= 1
+
+    # Collect: intro prefix + all target data questions (in original order from all_questions)
+    result = list(all_questions[start_idx:earliest_idx])  # intro prefix
+    for q in all_questions[earliest_idx:]:
+        if q.get("id") in target_ids:
+            result.append(q)
+    return result
+
+
 async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
     """
     Check if required basic questionnaire fields are present in patient_context.
@@ -146,6 +194,9 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
     Reads the `health-basic` questionnaire from DB, filters required questions,
     checks each against patient_context, and either passes through or returns
     only the missing required fields with their full question definitions.
+
+    When is_re_assessment is True, all data questions are treated as missing
+    and the full questionnaire (including intro pages) is returned.
     """
     # 1. Gate: skip if not required
     if not state.require_basic_questionnaire:
@@ -176,7 +227,7 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
         state.missing_basic_fields = []
         return state
 
-    # 3. Get all data questions (skip intro/transition screens)
+    # 3. Get all pages and data questions
     questions = questionnaire.questions or []
     data_questions = [q for q in questions if q.get("type") not in ("intro",)]
 
@@ -195,6 +246,30 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
     if not state.patient_context:
         logger.warning("check_basic_questionnaire: patient_context is None")
         state.missing_basic_fields = []
+        return state
+
+    # 4a. is_re_assessment: treat ALL data questions as missing, return full pages
+    if state.is_re_assessment:
+        logger.info("Re-assessment mode: returning full questionnaire with intro pages")
+        all_data_question_ids = [q.get("id") for q in data_questions]
+        recommended_data_collection = []
+        for q in data_questions:
+            recommended_data_collection.append({
+                "id": q.get("id"),
+                "question": q.get("title", ""),
+                "reason": "基础问卷必填项缺失" if q.get("required") else "基础信息采集",
+                "priority": "required" if q.get("required") else "optional",
+            })
+
+        state.missing_basic_fields = all_data_question_ids
+        state.final_response = _build_missing_response(all_data_question_ids, data_questions)
+        state.structured_output = {
+            "status": "missing_basic_info",
+            "questionnaire_type": questionnaire.questionnaire_id,
+            "missing_fields": all_data_question_ids,
+            "recommended_data_collection": recommended_data_collection,
+            "questions": questions,  # Full pages including intro
+        }
         return state
 
     # Check each required field against patient_context
@@ -233,7 +308,7 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
     # disease-history not answered (all required fields present) → ask disease-history
     if not missing_fields and dh_not_answered:
         missing_required_questions = []
-        return_questions = [dh_question]
+        return_questions = _include_intro_for_questions(questions, [dh_question])
         state.missing_basic_fields = ["disease_labels"]  # non-empty to trigger route
         state.final_response = _build_missing_response([], return_questions)
         recommended_data_collection = [{
@@ -254,17 +329,26 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
 
     # disease-history answered empty (no diseases) + symptoms not answered → ask symptoms
     if not missing_fields and dh_empty and symp_not_answered:
-        return_questions = [symptoms_question] if symptoms_question else []
-        if not return_questions:
+        target_data_questions = [symptoms_question] if symptoms_question else []
+        if not target_data_questions:
             state.missing_basic_fields = []
             return state
+        return_questions = _include_intro_for_questions(questions, target_data_questions)
         state.missing_basic_fields = ["symptoms"]
         state.final_response = _build_missing_response([], return_questions)
+        recommended_data_collection = []
+        for q in target_data_questions:
+            recommended_data_collection.append({
+                "id": q.get("id"),
+                "question": q.get("title", ""),
+                "reason": "基础信息采集",
+                "priority": "optional",
+            })
         state.structured_output = {
             "status": "missing_basic_info",
             "questionnaire_type": questionnaire.questionnaire_id,
             "missing_fields": [],
-            "recommended_data_collection": [],
+            "recommended_data_collection": recommended_data_collection,
             "questions": return_questions,
         }
         logger.info("No diseases selected — returning symptoms question")
@@ -283,15 +367,17 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
             has_health_data = True
 
     if has_health_data:
-        # Health archive has data → only return missing required fields
-        return_questions = list(missing_required_questions)
+        # Health archive has data → only return missing required fields + intro
+        return_data_questions = list(missing_required_questions)
+        return_questions = _include_intro_for_questions(questions, return_data_questions)
         logger.info(
             f"Has health data ({populated_count} fields populated), "
-            f"returning {len(missing_required_questions)} missing required questions"
+            f"returning {len(return_data_questions)} missing required questions"
         )
     else:
-        # No health data → return entire questionnaire (including non-required)
-        return_questions = list(data_questions)
+        # No health data → return entire questionnaire (including non-required and intro)
+        return_questions = list(questions)  # Full pages with intro
+        return_data_questions = list(data_questions)
         logger.info(
             f"No health data, returning full questionnaire "
             f"({len(data_questions)} questions, {len(missing_required_questions)} missing required)"
@@ -306,12 +392,14 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
             dh_q = next((q for q in data_questions if q.get("id") == "disease-history"), None)
             if dh_q:
                 return_questions.append(dh_q)
+                return_data_questions.append(dh_q)
 
     state.missing_basic_fields = missing_fields
     state.final_response = _build_missing_response(missing_fields, return_questions)
 
+    # recommended_data_collection only includes data questions (no intro)
     recommended_data_collection = []
-    for q in return_questions:
+    for q in return_data_questions:
         recommended_data_collection.append({
             "id": q.get("id"),
             "question": q.get("title", ""),

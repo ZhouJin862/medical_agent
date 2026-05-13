@@ -158,6 +158,8 @@ class AgentState(BaseModel):
         description="If True, check for missing basic questionnaire fields before skill execution")
     missing_basic_fields: Optional[List[str]] = Field(default=None,
         description="Missing basic field names after check. None=not checked, []=all present")
+    is_re_assessment: bool = Field(default=False,
+        description="If True, treat all questions as missing and start from intro page")
 
     # Metadata
     start_time: Optional[datetime] = None

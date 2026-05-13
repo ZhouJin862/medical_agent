@@ -494,12 +494,56 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
 
     # Risk warnings
     risk_warnings = []
+
+    # Build prediction data
+    risk_tier = risk_data.get('risk_tier', '')
+    ldl_target = risk_data.get('ldl_target', '')
+    at_target = risk_data.get('at_target', False)
+    ldl_strat = input_data.get('ldl_stratification', {})
+
+    follow_up_map = {
+        '极高危': '每1-3个月', '高危': '每1-3个月',
+        '中危': '每3-6个月', '低危': '每6-12个月',
+    }
+    follow_up = follow_up_map.get(risk_tier, '每3-6个月')
+
+    key_factors = []
+    if ldl_c:
+        try:
+            lv = float(ldl_c)
+            if lv >= 4.1:
+                key_factors.append("LDL-C显著升高")
+            elif lv >= 3.4:
+                key_factors.append("LDL-C边缘升高")
+        except (ValueError, TypeError):
+            pass
+    if risk_tier:
+        key_factors.append(f"ASCVD风险{risk_tier}")
+    if not at_target:
+        key_factors.append("LDL-C未达标")
+
+    prediction = None
+    if key_factors:
+        prediction = {
+            "risk_type": "ascvd",
+            "timeframe": "10年",
+            "risk_level": risk_tier or risk_grade,
+            "key_factors": key_factors,
+            "follow_up": follow_up,
+        }
+
     if tc:
         try:
             if float(tc) >= 6.2:
-                risk_warnings.append({"title": "胆固醇严重偏高", "description": f"总胆固醇{tc}mmol/L，提示高胆固醇血症", "level": "high"})
+                desc = f"总胆固醇{tc}mmol/L，提示高胆固醇血症"
+                if prediction:
+                    desc += f"；ASCVD风险分层为{risk_tier}，建议{follow_up}复查"
+                risk_warnings.append({"title": "胆固醇严重偏高", "description": desc, "level": "high", "prediction": prediction})
             elif float(tc) >= 5.2:
-                risk_warnings.append({"title": "胆固醇偏高", "description": f"总胆固醇{tc}mmol/L，边缘升高", "level": "medium"})
+                desc = f"总胆固醇{tc}mmol/L，边缘升高"
+                if prediction:
+                    desc += f"；建议{follow_up}复查"
+                risk_warnings.append({"title": "胆固醇偏高", "description": desc, "level": "medium", "prediction": prediction})
         except (ValueError, TypeError):
             pass
 

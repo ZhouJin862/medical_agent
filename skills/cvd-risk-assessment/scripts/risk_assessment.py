@@ -732,31 +732,88 @@ class CVDAssessmentExecutor:
 
         # Risk warnings
         risk_warnings = []
+
+        # Build prediction data
+        key_factors = []
+        if patient.sbp and patient.sbp >= 140:
+            key_factors.append(f"{disease_staging or '高血压'}")
+        if patient.tc and patient.tc >= 5.2:
+            key_factors.append("高胆固醇血症")
+        if patient.ldl_c and patient.ldl_c >= 3.4:
+            key_factors.append("LDL-C偏高")
+        if patient.diabetes:
+            key_factors.append("糖尿病")
+        if patient.smoking:
+            key_factors.append("吸烟")
+        if patient.bmi and patient.bmi >= 28:
+            key_factors.append("肥胖")
+        elif patient.bmi and patient.bmi >= 24:
+            key_factors.append("超重")
+
+        follow_up_map = {
+            "慢病": "每1-3个月", "重症": "每1-2周",
+            "亚健康": "每3-6个月", "健康": "每年",
+        }
+        follow_up = follow_up_map.get(primary, "每3-6个月")
+
         if result.ten_year_risk:
             cat = self._get_category_zh_by_value(result.ten_year_risk)
+            ten_year_pred = {
+                "risk_type": "cardiovascular",
+                "timeframe": "10年",
+                "risk_level": cat,
+                "key_factors": key_factors if key_factors else ["心血管风险因素"],
+                "follow_up": follow_up,
+            }
+            if result.ten_year_risk_range:
+                ten_year_pred["probability"] = result.ten_year_risk_range
+            if result.lifetime_risk:
+                lifetime_label = "高危" if result.lifetime_risk == "high" else "低危"
+                ten_year_pred["lifetime_risk"] = lifetime_label
+            if getattr(result, 'assessment_path', ''):
+                ten_year_pred["model"] = "China-PAR"
+
             if "高" in cat or "很高" in cat:
                 risk_warnings.append({
                     "title": "心血管事件风险偏高",
-                    "description": f"10年心血管病风险为{result.ten_year_risk_range or '偏高'}，属于{cat}，建议积极控制血压血脂",
+                    "description": f"10年心血管病风险为{result.ten_year_risk_range or '偏高'}，属于{cat}，建议积极控制血压血脂，{follow_up}复查",
                     "level": "high",
+                    "prediction": ten_year_pred,
                 })
             elif "中" in cat:
                 risk_warnings.append({
                     "title": "心血管风险需关注",
-                    "description": f"10年心血管病风险为{result.ten_year_risk_range or '中等'}，属于{cat}，建议加强血压和血脂管理",
+                    "description": f"10年心血管病风险为{result.ten_year_risk_range or '中等'}，属于{cat}，建议加强血压和血脂管理，{follow_up}复查",
                     "level": "medium",
+                    "prediction": ten_year_pred,
                 })
         if patient.sbp and patient.sbp >= 160:
+            bp_pred = {
+                "risk_type": "cardiovascular",
+                "timeframe": "10年",
+                "risk_level": cat if result.ten_year_risk else "高危",
+                "key_factors": key_factors if key_factors else [f"{disease_staging}"],
+                "follow_up": follow_up,
+            }
             risk_warnings.append({
                 "title": "血压严重偏高",
-                "description": f"收缩压{patient.sbp}mmHg，已达{disease_staging}，需尽快就医调整方案",
+                "description": f"收缩压{patient.sbp}mmHg，已达{disease_staging}，需尽快就医调整方案，{follow_up}复查",
                 "level": "high",
+                "prediction": bp_pred,
             })
         elif patient.sbp and patient.sbp >= 140:
+            bp_pred = {
+                "risk_type": "cardiovascular",
+                "timeframe": "10年",
+                "risk_level": cat if result.ten_year_risk else "中危",
+                "key_factors": key_factors if key_factors else [f"{disease_staging}"],
+                "follow_up": follow_up,
+            }
             risk_warnings.append({
                 "title": "血压未达标",
-                "description": f"收缩压{patient.sbp}mmHg，建议调整生活方式或用药",
+                "description": f"收缩压{patient.sbp}mmHg，建议调整生活方式或用药，{follow_up}复查",
                 "level": "medium",
+                "prediction": bp_pred,
             })
 
         return {

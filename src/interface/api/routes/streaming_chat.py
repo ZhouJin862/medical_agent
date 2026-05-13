@@ -286,6 +286,25 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
             if desc:
                 line += f"：{desc}"
             lines.append(line)
+            # Render prediction if present
+            pred = w.get("prediction")
+            if pred and isinstance(pred, dict):
+                pred_parts = []
+                risk_type = pred.get("risk_type", "")
+                timeframe = pred.get("timeframe", "")
+                risk_level = pred.get("risk_level", "")
+                factors = pred.get("key_factors", [])
+                follow_up = pred.get("follow_up", "")
+                if risk_level:
+                    pred_parts.append(f"风险等级：{risk_level}")
+                if timeframe:
+                    pred_parts.append(f"预测时段：{timeframe}")
+                if factors:
+                    pred_parts.append(f"关键因素：{'、'.join(factors)}")
+                if follow_up:
+                    pred_parts.append(f"随访建议：{follow_up}")
+                if pred_parts:
+                    lines.append(f"  - 预测信息：{'；'.join(pred_parts)}")
         lines.append("")
 
     # --- Intervention Prescriptions ---

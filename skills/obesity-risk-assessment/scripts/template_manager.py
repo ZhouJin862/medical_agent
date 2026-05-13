@@ -498,15 +498,63 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
 
     # Risk warnings
     risk_warnings = []
+
+    # Build prediction data
+    metabolic_diag = risk_data.get('metabolic_syndrome_diagnosis', '')
+    has_metabolic = '代谢综合征' in metabolic_diag and '未' not in metabolic_diag
+    target_weight = risk_data.get('target_weight', '')
+    risk_level = overall_risk.get('risk_level', '')
+
+    follow_up_map = {
+        '高风险': '每月', '中风险': '每1-3个月', '低风险': '每6-12个月',
+    }
+    follow_up = follow_up_map.get(risk_level, '每3-6个月')
+
+    key_factors = []
     if bmi:
         try:
             bv = float(bmi)
             if bv >= 32:
-                risk_warnings.append({"title": "重度肥胖", "description": f"BMI {bmi}，属于重度肥胖，需医学干预", "level": "high"})
+                key_factors.append("重度肥胖")
             elif bv >= 28:
-                risk_warnings.append({"title": "肥胖预警", "description": f"BMI {bmi}，属于肥胖，建议减重", "level": "medium"})
+                key_factors.append("肥胖")
             elif bv >= 24:
-                risk_warnings.append({"title": "超重提醒", "description": f"BMI {bmi}，属于超重，建议控制体重", "level": "low"})
+                key_factors.append("超重")
+        except (ValueError, TypeError):
+            pass
+    if has_metabolic:
+        key_factors.append("代谢综合征")
+    if risk_level in ('高风险',):
+        key_factors.append("多种代谢异常聚集")
+
+    prediction = None
+    if key_factors:
+        prediction = {
+            "risk_type": "metabolic",
+            "timeframe": "长期",
+            "risk_level": risk_level or risk_grade,
+            "key_factors": key_factors,
+            "follow_up": follow_up,
+        }
+        if target_weight:
+            prediction["target_weight"] = str(target_weight)
+
+    if bmi:
+        try:
+            bv = float(bmi)
+            if bv >= 32:
+                desc = f"BMI {bmi}，属于重度肥胖，需医学干预"
+                if prediction:
+                    desc += f"；建议{follow_up}随访"
+                risk_warnings.append({"title": "重度肥胖", "description": desc, "level": "high", "prediction": prediction})
+            elif bv >= 28:
+                desc = f"BMI {bmi}，属于肥胖，建议减重"
+                if prediction:
+                    desc += f"；建议{follow_up}随访"
+                risk_warnings.append({"title": "肥胖预警", "description": desc, "level": "medium", "prediction": prediction})
+            elif bv >= 24:
+                desc = f"BMI {bmi}，属于超重，建议控制体重"
+                risk_warnings.append({"title": "超重提醒", "description": desc, "level": "low", "prediction": prediction})
         except (ValueError, TypeError):
             pass
 

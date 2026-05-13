@@ -523,20 +523,65 @@ def _build_structured_result(risk_data, overall_risk, health_metrics, input_data
 
     # 6. Risk warnings
     risk_warnings = []
+
+    # Build prediction data from cardiovascular risk
+    cv_risk = risk_data.get('cardiovascular_risk', {}) if isinstance(risk_data, dict) else {}
+    risk_level_val = risk_data.get('risk_level', '')
+    follow_up_map = {
+        '低危': '每3-6个月', '中危': '每1-3个月',
+        '高危': '每2-4周', '很高危': '每1-2周',
+    }
+    follow_up = follow_up_map.get(risk_level_val, '每3-6个月')
+
+    # Key factors for prediction
+    key_factors = disease_risks.copy()  # e.g. ["2级高血压"]
+    if risk_level_val:
+        key_factors.append(f"心血管风险{risk_level_val}")
+    # Extract age-related factors from organ_damage or risk_data
+    age = risk_data.get('age')
+    if age:
+        try:
+            if float(age) >= 55:
+                key_factors.append("年龄≥55")
+        except (ValueError, TypeError):
+            pass
+
+    prediction = None
+    if risk_level_val and key_factors:
+        prediction = {
+            "risk_type": "cardiovascular",
+            "timeframe": "10年",
+            "risk_level": risk_level_val,
+            "key_factors": key_factors,
+            "follow_up": follow_up,
+        }
+
     if systolic:
         try:
             sv = float(systolic)
+            bp_pred = prediction
             if sv >= 180:
-                risk_warnings.append({"title": "血压严重偏高", "description": f"收缩压{systolic}mmHg，达3级高血压，需紧急就医", "level": "critical"})
+                desc = f"收缩压{systolic}mmHg，达3级高血压，需紧急就医"
+                if prediction:
+                    desc += f"；心血管风险分层为{risk_level_val}，建议{follow_up}复查"
+                risk_warnings.append({"title": "血压严重偏高", "description": desc, "level": "critical", "prediction": bp_pred})
             elif sv >= 160:
-                risk_warnings.append({"title": "血压明显偏高", "description": f"收缩压{systolic}mmHg，达2级高血压，需积极降压", "level": "high"})
+                desc = f"收缩压{systolic}mmHg，达2级高血压，需积极降压"
+                if prediction:
+                    desc += f"；心血管风险分层为{risk_level_val}，建议{follow_up}复查"
+                risk_warnings.append({"title": "血压明显偏高", "description": desc, "level": "high", "prediction": bp_pred})
             elif sv >= 140:
-                risk_warnings.append({"title": "血压未达标", "description": f"收缩压{systolic}mmHg，提示1级高血压，建议调整方案", "level": "medium"})
+                desc = f"收缩压{systolic}mmHg，提示1级高血压，建议调整方案"
+                if prediction:
+                    desc += f"；心血管风险分层为{risk_level_val}，建议{follow_up}复查"
+                risk_warnings.append({"title": "血压未达标", "description": desc, "level": "medium", "prediction": bp_pred})
         except (ValueError, TypeError):
             pass
-    risk_level_val = risk_data.get('risk_level', '')
     if risk_level_val in ('高危', '很高危'):
-        risk_warnings.append({"title": "心血管风险偏高", "description": "高血压合并高危因素，心脑血管事件风险显著增加", "level": "high"})
+        cv_desc = "高血压合并高危因素，心脑血管事件风险显著增加"
+        if prediction:
+            cv_desc += f"，建议{follow_up}复查"
+        risk_warnings.append({"title": "心血管风险偏高", "description": cv_desc, "level": "high", "prediction": prediction})
 
     return {
         "population_classification": population_classification,

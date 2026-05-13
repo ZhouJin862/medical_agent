@@ -481,6 +481,7 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
 
     # Return goal_selection status
     sport_question = {
+        "questionnaire_type": "health-goals",
         "id": "sport_target1",
         "type": "single",
         "componentType": "image",
@@ -493,6 +494,7 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
 
     state.structured_output = {
         "status": "goal_selection",
+        "questionnaire_type": "health-goals",
         "current_question": sport_question,
         "population_classification": population_classification,
         "_orchestration_phase": 2,
@@ -1339,6 +1341,7 @@ class SkillsIntegratedAgent:
         session_id: str = None,
         suggested_skill: str = None,
         require_basic_questionnaire: bool = False,
+        is_re_assessment: bool = False,
     ) -> AgentState:
         """
         Process a user request through the skills-integrated agent.
@@ -1373,6 +1376,8 @@ class SkillsIntegratedAgent:
             initial_state.confidence = 1.0
         if require_basic_questionnaire:
             initial_state.require_basic_questionnaire = True
+        if is_re_assessment:
+            initial_state.is_re_assessment = True
 
         logger.info(
             f"Processing request: patient_id={patient_id}, "
