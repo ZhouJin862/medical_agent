@@ -119,6 +119,14 @@ async def run_assessment(request: AssessmentRequest):
             health_data = {}
         health_data.update(map_questionnaire_answers_to_health_data(request.questionnaire_answers))
 
+    # Determine if user submitted questionnaire answers or health data
+    has_submitted_data = bool(
+        request.questionnaire_answers
+        or request.vital_signs
+        or request.patient_data
+        or request.medical_history
+    )
+
     if request.patient_data or request.vital_signs or request.medical_history:
         if not health_data:
             health_data = {}
@@ -168,6 +176,7 @@ async def run_assessment(request: AssessmentRequest):
                     session_id=session_id,
                     require_basic_questionnaire=True,
                     is_re_assessment=request.re_assessment,
+                    questionnaire_answers_submitted=has_submitted_data,
                 ),
                 timeout=120.0,
             )
@@ -187,6 +196,7 @@ async def run_assessment(request: AssessmentRequest):
                     session_id=session_id,
                     require_basic_questionnaire=True,
                     is_re_assessment=request.re_assessment,
+                    questionnaire_answers_submitted=has_submitted_data,
                 ),
                 timeout=120.0,
             )

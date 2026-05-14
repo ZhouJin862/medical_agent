@@ -305,6 +305,152 @@ def _map_ping_an_flat_fields_to_vital_signs(api_data: Dict[str, Any]) -> Dict[st
     return vital_signs
 
 
+def _map_gender_zh_to_en(gender_zh: str) -> Optional[str]:
+    """Map Chinese gender to internal English value."""
+    if not gender_zh:
+        return None
+    g = str(gender_zh).strip()
+    if g in ("男", "M", "MALE", "male"):
+        return "male"
+    if g in ("女", "F", "FEMALE", "female"):
+        return "female"
+    return g
+
+
+def _safe_float(value) -> Optional[float]:
+    """Convert value to float, return None if not possible."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _map_human_query_to_patient_context(data: dict) -> Dict[str, Any]:
+    """Map humanQuery API response data to patient_context (basic_info / vital_signs / medical_history).
+
+    The humanQuery response contains nested DTOs with String-typed values that need
+    flattening and type conversion for the internal PatientContext model.
+
+    Args:
+        data: The ``data`` field from humanQuery API response.
+
+    Returns:
+        Dict with keys ``basic_info``, ``vital_signs``, ``medical_history``.
+    """
+    basic_info: Dict[str, Any] = {}
+    vital_signs: Dict[str, Any] = {}
+    medical_history: Dict[str, Any] = {}
+
+    # --- basic info (top-level String fields) ---
+    basic_info["age"] = _safe_float(data.get("age"))
+    gender = _map_gender_zh_to_en(data.get("gender"))
+    if gender:
+        basic_info["gender"] = gender
+    # height/weight go into both basic_info (for display) and vital_signs (for questionnaire check)
+    if data.get("height"):
+        basic_info["height"] = _safe_float(data["height"])
+        vital_signs["height"] = _safe_float(data["height"])
+    if data.get("weight"):
+        basic_info["weight"] = _safe_float(data["weight"])
+        vital_signs["weight"] = _safe_float(data["weight"])
+    if data.get("waistCircumference"):
+        vital_signs["waist"] = _safe_float(data["waistCircumference"])
+    if data.get("bmi"):
+        basic_info["bmi"] = _safe_float(data["bmi"])
+        vital_signs["bmi"] = _safe_float(data["bmi"])
+    if data.get("smoke"):
+        basic_info["smoke"] = str(data["smoke"]).strip()
+    if data.get("drink"):
+        basic_info["drink"] = str(data["drink"]).strip()
+
+    # --- blood pressure DTO ---
+    bp = data.get("healthDigitalBloodPressureDTO") or {}
+    if bp.get("systolicPressure"):
+        vital_signs["systolic_bp"] = _safe_float(bp["systolicPressure"])
+    if bp.get("diastolicPressure"):
+        vital_signs["diastolic_bp"] = _safe_float(bp["diastolicPressure"])
+    if bp.get("heartRate"):
+        vital_signs["heart_rate"] = _safe_float(bp["heartRate"])
+
+    # --- blood lipids DTO ---
+    bl = data.get("healthDigitalBloodLipidsDTO") or {}
+    if bl.get("totalCholesterol"):
+        vital_signs["total_cholesterol"] = _safe_float(bl["totalCholesterol"])
+    if bl.get("triglyceride"):
+        vital_signs["triglyceride"] = _safe_float(bl["triglyceride"])
+    if bl.get("lowDensityLipoprotein"):
+        vital_signs["ldl_c"] = _safe_float(bl["lowDensityLipoprotein"])
+    if bl.get("highDensityLipoprotein"):
+        vital_signs["hdl_c"] = _safe_float(bl["highDensityLipoprotein"])
+
+    # --- uric acid DTO ---
+    ua = data.get("healthDigitalUricAcidDTO") or {}
+    if ua.get("uricAcid"):
+        vital_signs["uric_acid"] = _safe_float(ua["uricAcid"])
+
+    # --- blood glucose DTO ---
+    bg = data.get("healthDigitalBloodGlucoseDTO") or {}
+    if bg.get("fastingBloodGlucose"):
+        vital_signs["fasting_blood_glucose"] = _safe_float(bg["fastingBloodGlucose"])
+    if bg.get("hba1c"):
+        vital_signs["hba1c"] = _safe_float(bg["hba1c"])
+    if bg.get("postprandialBloodGlucose"):
+        vital_signs["postprandial_blood_glucose"] = _safe_float(bg["postprandialBloodGlucose"])
+
+    # --- disease DTO lists ---
+    # Chinese disease name → English label mapping for disease_labels
+    _ZH_TO_EN_DISEASE = {
+        "高血压": "hypertension",
+        "糖尿病": "diabetes",
+        "高血脂": "hyperlipidemia",
+        "高尿酸": "hyperuricemia",
+        "痛风": "gout",
+        "慢性阻塞性肺疾病": "copd",
+        "肾病": "kidney_disease",
+        "肝病": "liver_disease",
+        "癌症": "cancer",
+        "心脏病": "heart_disease",
+        "中风": "stroke",
+    }
+    diseases: list[str] = []
+    disease_labels: list[str] = []
+    for item in data.get("chronicDiseaseDTOList") or []:
+        name = (item.get("diseaseName") or "").strip()
+        if name:
+            diseases.append(name)
+            en = _ZH_TO_EN_DISEASE.get(name)
+            if en:
+                disease_labels.append(en)
+    for item in data.get("specialDiseaseDTOList") or []:
+        name = (item.get("diseaseName") or "").strip()
+        if name:
+            diseases.append(name)
+            en = _ZH_TO_EN_DISEASE.get(name)
+            if en:
+                disease_labels.append(en)
+    if diseases:
+        medical_history["diseases"] = diseases
+    if disease_labels:
+        medical_history["disease_labels"] = disease_labels
+
+    # Calculate BMI if missing but height/weight present
+    if "bmi" not in basic_info and "height" in basic_info and "weight" in basic_info:
+        h = basic_info["height"]
+        w = basic_info["weight"]
+        if h and w and h > 0:
+            height_m = h / 100.0 if h > 2.5 else h
+            if height_m > 0:
+                basic_info["bmi"] = round(w / (height_m * height_m), 1)
+
+    return {
+        "basic_info": {k: v for k, v in basic_info.items() if v is not None},
+        "vital_signs": {k: v for k, v in vital_signs.items() if v is not None},
+        "medical_history": {k: v for k, v in medical_history.items() if v is not None},
+    }
+
+
 def _extract_vital_signs_from_user_input(user_input: str, existing_vital_signs: dict = None) -> dict:
     """
     Extract vital signs from user's natural language input.
@@ -493,9 +639,78 @@ async def load_patient_node(state: AgentState) -> AgentState:
         vital_signs = state.previous_patient_context.get("vital_signs", {}).copy()
         medical_records = state.previous_patient_context.get("medical_history", {}).copy()
 
+    # --- Try humanQuery API first (if enabled) ---
+    human_query_ok = False
+    from src.config.settings import get_settings
+    _settings = get_settings()
+
+    if _settings.external_api_enabled and _settings.external_api_use_human_query and state.party_id:
+        try:
+            from mcp_servers.profile_server.pingan_client import PingAnHealthArchiveClient
+            async with PingAnHealthArchiveClient() as client:
+                hq_data = await client.query_human_info(state.party_id)
+            if hq_data:
+                mapped = _map_human_query_to_patient_context(hq_data)
+                # Merge basic_info with existing patient_data from previous context
+                basic_info = patient_data.get("basic_info", {})
+                for k, v in mapped["basic_info"].items():
+                    basic_info[k] = v
+                basic_info["patient_id"] = state.patient_id
+                basic_info["party_id"] = state.party_id
+                patient_data["basic_info"] = basic_info
+                # Merge vital_signs
+                for k, v in mapped["vital_signs"].items():
+                    vital_signs[k] = v
+                # Merge medical_history
+                for k, v in mapped["medical_history"].items():
+                    medical_records[k] = v
+                patient_data["source"] = "human_query_api"
+                patient_data["has_health_data"] = True
+                human_query_ok = True
+                logger.info(f"humanQuery success for party_id={state.party_id}, vital_signs={list(mapped['vital_signs'].keys())}")
+            else:
+                logger.info(f"humanQuery returned no data for party_id={state.party_id}, falling back to legacy API")
+        except Exception as e:
+            logger.warning(f"humanQuery failed: {e}, falling back to legacy API")
+
     # Check if Ping An health data was already fetched by streaming_chat.py
+    # Always process ping_an_health_data: when humanQuery failed, use as primary;
+    # when humanQuery succeeded but returned sparse data, merge as supplement.
     if state.ping_an_health_data:
-        logger.info(f"Using pre-fetched Ping An health data from streaming_chat")
+        if human_query_ok:
+            # humanQuery succeeded but may have sparse data — merge ping_an_health_data
+            # as supplement (only fill fields not already set by humanQuery)
+            logger.info(f"humanQuery succeeded, merging ping_an_health_data as supplement")
+            api_data = state.ping_an_health_data
+            basic_info = patient_data.get("basic_info", {})
+            # Merge flat fields from api_data into basic_info (only if not already set)
+            for field in ["age", "gender", "height", "weight", "bmi", "smoke", "drink"]:
+                if field in api_data and api_data[field] is not None and api_data[field] != "":
+                    if field not in basic_info or basic_info[field] is None:
+                        if field == "age":
+                            basic_info[field] = int(str(api_data[field]).strip())
+                        elif field == "gender":
+                            g = str(api_data[field]).strip().upper()
+                            if g in ("F", "FEMALE", "女"):
+                                basic_info[field] = "female"
+                            elif g in ("M", "MALE", "男"):
+                                basic_info[field] = "male"
+                            else:
+                                basic_info[field] = api_data[field]
+                        else:
+                            basic_info[field] = _safe_float(api_data[field])
+            patient_data["basic_info"] = basic_info
+            # Merge vital_signs from flat fields (only if not already set)
+            flat_vs = _map_ping_an_flat_fields_to_vital_signs(api_data)
+            for k, v in flat_vs.items():
+                if k not in vital_signs and v is not None:
+                    vital_signs[k] = v
+            # Merge diseaseLabels
+            if "diseaseLabels" in api_data and api_data["diseaseLabels"]:
+                if "disease_labels" not in medical_records:
+                    medical_records["disease_labels"] = api_data["diseaseLabels"]
+        else:
+            logger.info(f"Using pre-fetched Ping An health data from streaming_chat")
         api_data = state.ping_an_health_data
         party_id = state.party_id
 
@@ -532,7 +747,13 @@ async def load_patient_node(state: AgentState) -> AgentState:
 
         # Extract diseaseLabels (new field with disease names)
         # Only set if key exists in api_data — distinguish "not provided" from "empty list"
-        disease_labels = api_data.get("diseaseLabels") if "diseaseLabels" in api_data else None
+        # If api_data doesn't have diseaseLabels, preserve any disease_labels from humanQuery merge
+        if "diseaseLabels" in api_data:
+            disease_labels = api_data.get("diseaseLabels")
+        elif "disease_labels" in medical_records:
+            disease_labels = medical_records["disease_labels"]
+        else:
+            disease_labels = None
 
         # Detect API response format: indicatorItems vs cycleItems vs flat fields
         if "indicatorItems" in api_data:

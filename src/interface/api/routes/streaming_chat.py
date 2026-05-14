@@ -10,7 +10,7 @@ import logging
 import re
 from typing import AsyncIterator, Optional, Dict, Any
 
-from src.interface.api.routes.assessment import _extract_structured_result, transform_abnormal_indicators
+from src.interface.api.routes.assessment import _extract_structured_result, transform_abnormal_indicators, _build_current_question
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -610,6 +610,7 @@ async def chat_stream(
                 logger.info(f"Restored previous patient context with {len(previous_patient_context.get('vital_signs', {}))} vital signs")
 
             # Merge questionnaire answers into health_data if provided
+            has_questionnaire_answers = bool(request.questionnaire_answers)
             if request.questionnaire_answers:
                 from src.infrastructure.agent.nodes.check_basic_questionnaire import map_questionnaire_answers_to_health_data
                 if not health_data:
@@ -628,6 +629,7 @@ async def chat_stream(
                         previous_patient_context=previous_patient_context,  # Pass previous context
                         session_id=session.session_id,  # Pass session_id for memory isolation
                         require_basic_questionnaire=True,
+                        questionnaire_answers_submitted=has_questionnaire_answers,
                     ),
                     timeout=120.0  # 2 minute timeout for the entire agent pipeline
                 )
@@ -670,6 +672,36 @@ async def chat_stream(
             skill_used = agent_state.suggested_skill
             intent = agent_state.intent.value if agent_state.intent else "chat"
             confidence = agent_state.confidence or 0.0
+
+            # Handle missing_basic_info: build current_question and track seen intro pages
+            so = getattr(agent_state, 'structured_output', None)
+            if isinstance(so, dict) and so.get("status") == "missing_basic_info":
+                # Restore _seen_intro_pages from session metadata
+                seen_intro_pages = session.metadata.get("_seen_intro_pages", []) if session.metadata else []
+                health_data_with_seen = dict(health_data or {})
+                health_data_with_seen["_seen_intro_pages"] = seen_intro_pages
+
+                # Build current_question (same logic as assessment.py)
+                recommended = so.get("recommended_data_collection", [])
+                questions = so.get("questions", [])
+                questionnaire_type = so.get("questionnaire_type")
+                current_q = _build_current_question(
+                    questions, recommended, questionnaire_type,
+                    health_data=health_data_with_seen,
+                )
+
+                # Track seen intro pages
+                if current_q and current_q.get("type") == "intro":
+                    intro_id = current_q.get("id")
+                    if intro_id and intro_id not in seen_intro_pages:
+                        seen_intro_pages.append(intro_id)
+                        if not session.metadata:
+                            session.metadata = {}
+                        session.metadata["_seen_intro_pages"] = seen_intro_pages
+
+                # Add current_question to structured_output for frontend
+                so["current_question"] = current_q
+                logger.info(f"Built current_question for missing_basic_info: id={current_q.get('id') if current_q else None}")
 
             # Build report: prefer modules markdown for package assessment, then structured_result report
             so = getattr(agent_state, 'structured_output', None)

@@ -34,6 +34,7 @@ from src.domain.shared.services.unified_skills_repository import (
     UnifiedSkillsRepository,
 )
 from src.infrastructure.agent.state import AgentState, AgentStatus, SkillExecutionResult, IntentType, PatientContext, ConversationMemory
+from src.infrastructure.agent.nodes.external_sync import sync_patient_data_node, push_insight_node
 from src.infrastructure.database import get_db_session
 
 logger = logging.getLogger(__name__)
@@ -1254,11 +1255,13 @@ def create_skills_integrated_graph():
     # Add all nodes
     workflow.add_node("load_patient", load_patient_node)
     workflow.add_node("check_basic_questionnaire", check_basic_questionnaire_node)
+    workflow.add_node("sync_patient_data", sync_patient_data_node)
     workflow.add_node("retrieve_memory", retrieve_memory_node)
     workflow.add_node("classify_intent", classify_intent_with_llm_node)
     workflow.add_node("execute_skill", execute_claude_skill_node)
     workflow.add_node("aggregate", aggregate_results_node)
     workflow.add_node("save_memory", save_memory_node)
+    workflow.add_node("push_insight", push_insight_node)
     workflow.add_node("error", lambda s: s)
 
     # Define the entry point
@@ -1271,35 +1274,46 @@ def create_skills_integrated_graph():
     def route_after_questionnaire_check(state: AgentState) -> str:
         if state.missing_basic_fields and len(state.missing_basic_fields) > 0:
             return "save_memory"
+        if state.questionnaire_answers_submitted:
+            return "sync_patient_data"
         return "retrieve_memory"
 
     workflow.add_conditional_edges(
         "check_basic_questionnaire",
         route_after_questionnaire_check,
-        {"retrieve_memory": "retrieve_memory", "save_memory": "save_memory"},
+        {
+            "sync_patient_data": "sync_patient_data",
+            "retrieve_memory": "retrieve_memory",
+            "save_memory": "save_memory",
+        },
     )
+
+    # sync_patient_data → retrieve_memory
+    workflow.add_edge("sync_patient_data", "retrieve_memory")
 
     workflow.add_edge("retrieve_memory", "classify_intent")
     workflow.add_edge("classify_intent", "execute_skill")
     workflow.add_edge("execute_skill", "aggregate")
 
-    # Conditional routing for error handling
+    # Conditional routing for error handling / fan-out
     def should_continue(state: AgentState) -> str:
         if state.error_message:
             return "error"
-        return "save_memory"
+        return "save_and_push"
 
     workflow.add_conditional_edges(
         "aggregate",
         should_continue,
         {
-            "save_memory": "save_memory",
+            "save_and_push": "save_memory",
             "error": "error",
         }
     )
 
-    # Final step
-    workflow.add_edge("save_memory", END)
+    # Fan-out: save_memory → push_insight → END
+    # push_insight runs after save_memory (sequential fan-out to avoid state conflicts)
+    workflow.add_edge("save_memory", "push_insight")
+    workflow.add_edge("push_insight", END)
     workflow.add_edge("error", END)
 
     # Compile the graph
@@ -1342,6 +1356,7 @@ class SkillsIntegratedAgent:
         suggested_skill: str = None,
         require_basic_questionnaire: bool = False,
         is_re_assessment: bool = False,
+        questionnaire_answers_submitted: bool = False,
     ) -> AgentState:
         """
         Process a user request through the skills-integrated agent.
@@ -1355,6 +1370,7 @@ class SkillsIntegratedAgent:
             session_id: Optional session ID for memory isolation
             suggested_skill: Optional skill name to skip intent classification
             require_basic_questionnaire: If True, check for missing basic fields before skills
+            questionnaire_answers_submitted: If True, trigger sync_patient_data after check passes
 
         Returns:
             Final agent state with results
@@ -1378,6 +1394,8 @@ class SkillsIntegratedAgent:
             initial_state.require_basic_questionnaire = True
         if is_re_assessment:
             initial_state.is_re_assessment = True
+        if questionnaire_answers_submitted:
+            initial_state.questionnaire_answers_submitted = True
 
         logger.info(
             f"Processing request: patient_id={patient_id}, "

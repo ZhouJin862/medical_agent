@@ -741,9 +741,9 @@ class CVDAssessmentExecutor:
             key_factors.append("高胆固醇血症")
         if patient.ldl_c and patient.ldl_c >= 3.4:
             key_factors.append("LDL-C偏高")
-        if patient.diabetes:
+        if patient.has_diabetes:
             key_factors.append("糖尿病")
-        if patient.smoking:
+        if patient.smoker:
             key_factors.append("吸烟")
         if patient.bmi and patient.bmi >= 28:
             key_factors.append("肥胖")

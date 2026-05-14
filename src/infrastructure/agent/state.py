@@ -160,6 +160,8 @@ class AgentState(BaseModel):
         description="Missing basic field names after check. None=not checked, []=all present")
     is_re_assessment: bool = Field(default=False,
         description="If True, treat all questions as missing and start from intro page")
+    questionnaire_answers_submitted: bool = Field(default=False,
+        description="Whether questionnaire answers were submitted in this request (triggers sync_patient_data)")
 
     # Metadata
     start_time: Optional[datetime] = None

@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     skill_executor_timeout: int = Field(default=30, description="Skill execution timeout in seconds")
     skill_executor_docker_image: str = Field(default="python:3.11-slim", description="Docker image for msagent-sandbox")
 
+    # External API Integration
+    external_api_enabled: bool = Field(default=True, description="Enable external API push (sync patient data + insight)")
+    external_api_use_human_query: bool = Field(default=True, description="Use humanQuery API instead of legacy queryHealthData")
+
 
 @lru_cache
 def get_settings() -> Settings:

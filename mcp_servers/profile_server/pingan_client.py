@@ -33,6 +33,11 @@ class PingAnHealthArchiveClient:
     IESP_ACCESS_ID = "1abc"
     IESP_API_CODE = "queryHealthData"
 
+    # External API codes
+    API_CODE_HUMAN_QUERY = "humanQuery"
+    API_CODE_ADD_HUMAN_INFO = "addHumanInfo"
+    API_CODE_INSIGHT_SAVE = "insightSave"
+
     def __init__(self, timeout: int = 30):
         """
         Initialize the Ping An API client.
@@ -199,3 +204,109 @@ class PingAnHealthArchiveClient:
                     "iesp_api_code": self.IESP_API_CODE
                 }
             }
+
+    async def _call_iesp_api(
+        self,
+        api_code: str,
+        body: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Call an IESP API endpoint with OAuth2 authentication.
+
+        Args:
+            api_code: The iespApiCode to use (e.g. humanQuery, addHumanInfo, insightSave).
+            body: JSON request body.
+
+        Returns:
+            Parsed API response dict.
+        """
+        if not self._client:
+            raise RuntimeError("Client not initialized. Use async context manager.")
+
+        request_id = str(int(time.time() * 1000))
+
+        try:
+            access_token = await self._get_access_token()
+
+            params = {
+                "iespAccessId": self.IESP_ACCESS_ID,
+                "iespApiCode": api_code,
+                "access_token": access_token,
+                "request_id": request_id,
+            }
+
+            logger.info(f"Calling IESP API: api_code={api_code}, request_id={request_id}")
+
+            response = await self._client.post(
+                self.DATA_URL,
+                params=params,
+                json=body,
+            )
+            response.raise_for_status()
+
+            api_response = response.json()
+            logger.info(f"IESP API response: api_code={api_code}, ret={api_response.get('ret')}, code={api_response.get('code')}")
+
+            return api_response
+
+        except httpx.HTTPError as e:
+            logger.error(f"IESP API call failed: api_code={api_code}, error={e}")
+            return {"ret": "-1", "code": "-1", "msg": str(e)}
+
+    async def query_human_info(self, party_id: str) -> Optional[Dict[str, Any]]:
+        """Query health digital human info via humanQuery API.
+
+        Args:
+            party_id: User/patient identifier.
+
+        Returns:
+            The ``data`` field from the API response on success, or None on failure.
+        """
+        resp = await self._call_iesp_api(self.API_CODE_HUMAN_QUERY, {"partyId": party_id})
+
+        if resp.get("ret") == "0" and resp.get("code") == "0":
+            data = resp.get("data")
+            if data:
+                logger.info(f"humanQuery success for party_id={party_id}")
+                return data
+            else:
+                logger.info(f"humanQuery returned empty data for party_id={party_id}")
+                return None
+        else:
+            logger.warning(f"humanQuery failed: ret={resp.get('ret')}, msg={resp.get('msg')}")
+            return None
+
+    async def add_human_info(self, payload: Dict[str, Any]) -> bool:
+        """Push patient health data via addHumanInfo API.
+
+        Args:
+            payload: Full request body matching addHumanInfo schema.
+
+        Returns:
+            True if the API returned success, False otherwise.
+        """
+        resp = await self._call_iesp_api(self.API_CODE_ADD_HUMAN_INFO, payload)
+
+        if resp.get("ret") == "0" and resp.get("code") == "0":
+            logger.info(f"addHumanInfo success")
+            return True
+        else:
+            logger.warning(f"addHumanInfo failed: ret={resp.get('ret')}, msg={resp.get('msg')}")
+            return False
+
+    async def save_insight(self, payload: Dict[str, Any]) -> bool:
+        """Push assessment insight via insightSave API.
+
+        Args:
+            payload: Full request body matching insightSave schema.
+
+        Returns:
+            True if the API returned success, False otherwise.
+        """
+        resp = await self._call_iesp_api(self.API_CODE_INSIGHT_SAVE, payload)
+
+        if resp.get("ret") == "0" and resp.get("code") == "0":
+            logger.info(f"insightSave success")
+            return True
+        else:
+            logger.warning(f"insightSave failed: ret={resp.get('ret')}, msg={resp.get('msg')}")
+            return False

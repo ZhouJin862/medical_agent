@@ -125,6 +125,21 @@ CHRONIC_DISEASE_KEYWORDS = {
     "stroke": ("中风", 25),
 }
 
+# Reverse mapping: Chinese disease name → English label for fallback
+_ZH_TO_EN_DISEASE = {
+    "高血压": "hypertension",
+    "糖尿病": "diabetes",
+    "高血脂": "hyperlipidemia",
+    "高尿酸": "hyperuricemia",
+    "痛风": "gout",
+    "慢性阻塞性肺疾病": "copd",
+    "肾病": "kidney_disease",
+    "肝病": "liver_disease",
+    "癌症": "cancer",
+    "心脏病": "heart_disease",
+    "中风": "stroke",
+}
+
 # Group thresholds
 GROUP_THRESHOLDS = [
     (81, "重症"),
@@ -297,10 +312,22 @@ class PopulationClassifier:
 
         if 'medical_history' in input_data:
             mh = input_data['medical_history']
-            # Extract disease labels
+            # Extract disease labels (English labels like "hypertension")
             disease_labels = mh.get('disease_labels', [])
             if disease_labels:
                 patient_data['disease_labels'] = disease_labels
+            else:
+                # Fallback: convert Chinese disease names to English labels
+                diseases = mh.get('diseases', [])
+                if diseases:
+                    converted = []
+                    for d in diseases:
+                        if isinstance(d, str):
+                            en = _ZH_TO_EN_DISEASE.get(d)
+                            if en:
+                                converted.append(en)
+                    if converted:
+                        patient_data['disease_labels'] = converted
             # Extract symptoms
             symptoms = mh.get('symptoms', [])
             if symptoms:
@@ -857,16 +884,19 @@ class PopulationClassifier:
         has_chronic_disease = dis_score > 0
 
         if has_chronic_disease:
-            # 1. Has chronic disease → 慢病
-            primary_group = "慢病"
-            all_basis = dis_basis
-            total_score = dis_score
-            risk_indicators = []
-            # Still score indicators for completeness
+            # 1. Has chronic disease → at minimum 慢病
+            #    If total score ≥ 81 (重症 threshold), upgrade to 重症
             ind_score, ind_basis, risk_indicators = self._score_indicators(patient_data)
             all_basis = ind_basis + dis_basis
             total_score = ind_score + dis_score
             symp_score, symp_basis, symp_names = 0, [], []
+            if total_score >= 81:
+                primary_group = "重症"
+                groups = ["重症"]
+            else:
+                primary_group = "慢病"
+                groups = ["慢病"]
+            follow_up = FOLLOW_UP_MAP[primary_group]
         else:
             # 2. No chronic disease → indicators + symptoms combined
             ind_score, ind_basis, risk_indicators = self._score_indicators(patient_data)
@@ -875,14 +905,11 @@ class PopulationClassifier:
             all_basis = ind_basis + symp_basis
             total_score = ind_score + symp_score
 
-            if ind_score == 0 and symp_score <= SUBHEALTH_SYMPTOM_THRESHOLD:
-                primary_group = "健康"
-            else:
-                primary_group = "亚健康"
+            # Use score-based thresholds for consistency
+            groups, follow_up = self._determine_groups(total_score)
+            primary_group = groups[0]
 
-        # Determine groups and follow-up
-        groups = [primary_group]
-        follow_up = FOLLOW_UP_MAP[primary_group]
+        # Determine groups and follow-up (already set via _determine_groups)
 
         # Build output
         modules = {
