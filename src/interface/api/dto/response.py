@@ -368,6 +368,17 @@ class StreamingChatEndChunk(StreamingChatChunk):
     structured_result: dict | None = Field(None, description="Full structured assessment result (same format as Assessment API)")
 
 
+class StreamingChatPhaseChunk(BaseModel):
+    """Phase chunk for incremental SSE push during assessment."""
+
+    type: str = "phase"
+    phase_name: str = Field(..., description="Phase name: population_classification|abnormal_indicators|risk_warnings|intervention_prescriptions")
+    phase_label: str = Field(..., description="Human-readable Chinese label for the phase section")
+    content: str = Field(..., description="Markdown-formatted content for this phase")
+    structured_data: dict[str, Any] | None = Field(None, description="Structured JSON data for this phase (for frontend state)")
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat(), description="Chunk timestamp")
+
+
 class StreamingChatErrorChunk(StreamingChatChunk):
     """Error chunk for streaming chat."""
 

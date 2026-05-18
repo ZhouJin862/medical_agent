@@ -24,6 +24,7 @@ from src.interface.api.dto.response import (
     StreamingChatTokenChunk,
     StreamingChatEndChunk,
     StreamingChatErrorChunk,
+    StreamingChatPhaseChunk,
 )
 from src.infrastructure.session.session_manager import SessionManager, get_session_manager
 from src.infrastructure.agent.state import IntentType
@@ -84,6 +85,19 @@ async def _get_health_data_from_pingan(party_id: str) -> Optional[Dict[str, Any]
         api_code = health_data.get("code") or health_data.get("_api_response", {}).get("code")
 
         if health_data and api_code == "S000000":
+            # Check if response actually contains health data (not just "No data found" placeholder)
+            info = health_data.get("info", "")
+            if "No data found" in info or "no data" in info.lower():
+                logger.info(f"Ping An API returned success but no actual data for party_id: {party_id}, info={info}")
+                return None
+            # Verify at least one meaningful health field exists
+            health_fields = {"age", "gender", "diseaseLabels", "diseaseHistory",
+                             "systolicPressure", "diastolicPressure", "height", "weight",
+                             "bmi", "indicatorItems", "cycleItems"}
+            has_health_data = any(f in health_data for f in health_fields)
+            if not has_health_data:
+                logger.info(f"Ping An API returned success but no health fields for party_id: {party_id}")
+                return None
             logger.info(f"Successfully retrieved health data for party_id: {party_id}")
             # Log what data we got
             if "age" in health_data:
@@ -160,6 +174,68 @@ def _format_modules_to_markdown(modules: Dict[str, Any]) -> str:
     return report if report.strip() else "评估完成，但未生成报告内容。"
 
 
+def _format_questionnaire_to_markdown(current_question: Dict[str, Any]) -> str:
+    """Convert a current_question object into readable markdown for chat rendering.
+
+    Handles both intro pages and data-collection questions with their options.
+    """
+    if not current_question:
+        return ""
+
+    q_type = current_question.get("type", "")
+    title = current_question.get("title", "")
+    component_type = current_question.get("componentType", "")
+    options = current_question.get("options", [])
+    total = current_question.get("totalQs", 0)
+    current_idx = current_question.get("currentIndex", 0)
+
+    lines = []
+
+    # Progress indicator
+    if total and current_idx:
+        lines.append(f"**({current_idx}/{total})**")
+
+    if q_type == "intro":
+        # Intro page: just show title and optional description
+        lines.append(f"## {title}")
+        behavior = current_question.get("behavior")
+        if behavior and isinstance(behavior, dict):
+            desc = behavior.get("description", "")
+            if desc:
+                lines.append(f"\n{desc}")
+    else:
+        # Data question
+        lines.append(f"## {title}")
+
+        if options:
+            if component_type in ("single", "radio") or (not component_type and q_type == "single"):
+                # Single select
+                for opt in options:
+                    label = opt.get("label", opt.get("value", ""))
+                    lines.append(f"- {label}")
+            elif component_type in ("multipleSubchoice", "multiple", "checkbox"):
+                # Multiple select
+                for opt in options:
+                    label = opt.get("label", opt.get("value", ""))
+                    sub_options = opt.get("options", opt.get("subOptions", []))
+                    if sub_options:
+                        sub_labels = [s.get("label", s.get("value", "")) for s in sub_options]
+                        lines.append(f"- **{label}**：{' / '.join(sub_labels)}")
+                    else:
+                        lines.append(f"- {label}")
+            else:
+                # Generic option list
+                for opt in options:
+                    label = opt.get("label", opt.get("value", ""))
+                    lines.append(f"- {label}")
+        elif component_type == "number" or q_type == "number":
+            lines.append("\n> 请输入数值")
+        elif component_type == "slider":
+            lines.append("\n> 请选择数值")
+
+    return "\n".join(lines)
+
+
 def _build_health_report(sr: Dict[str, Any]) -> str:
     """Build a formatted health assessment report from structured_result.
 
@@ -171,6 +247,13 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
 
     # --- Population Classification ---
     pc = sr.get("population_classification", {})
+    if isinstance(pc, str):
+        try:
+            pc = json.loads(pc)
+        except (json.JSONDecodeError, TypeError):
+            pc = {}
+    if not isinstance(pc, dict):
+        pc = {}
     category = pc.get("primary_category", "")
     if category:
         lines.append(f"## 健康人群分组：**{category}**")
@@ -197,6 +280,11 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
 
     # --- Abnormal Indicators & Warnings ---
     abn = sr.get("abnormal_indicators", [])
+    if isinstance(abn, str):
+        try:
+            abn = json.loads(abn)
+        except (json.JSONDecodeError, TypeError):
+            abn = []
 
     # Support both old flat list and new {indicators, warnings} structure
     if isinstance(abn, dict):
@@ -213,6 +301,8 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
         lines.append("## 异常指标")
         lines.append("")
         for a in indicators:
+            if not isinstance(a, dict):
+                continue
             name = a.get("name", "")
             value = a.get("value", "")
             unit = a.get("unit", "")
@@ -230,6 +320,8 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
         lines.append("## 异常预警")
         lines.append("")
         for w in warnings:
+            if not isinstance(w, dict):
+                continue
             title = w.get("title", "")
             tip = w.get("tip", "")
             indices = w.get("indicator_indices", [])
@@ -248,10 +340,17 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
 
     # --- Disease Prediction ---
     dp = sr.get("disease_prediction", [])
+    if isinstance(dp, str):
+        try:
+            dp = json.loads(dp)
+        except (json.JSONDecodeError, TypeError):
+            dp = []
     if dp:
         lines.append("## 疾病风险预测")
         lines.append("")
         for p in dp:
+            if not isinstance(p, dict):
+                continue
             name = p.get("disease_name", "")
             prob = p.get("probability", "")
             level = p.get("risk_level", "")
@@ -274,10 +373,17 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
 
     # --- Risk Warnings ---
     rw = sr.get("risk_warnings", [])
+    if isinstance(rw, str):
+        try:
+            rw = json.loads(rw)
+        except (json.JSONDecodeError, TypeError):
+            rw = []
     if rw:
         lines.append("## 风险提示")
         lines.append("")
         for w in rw:
+            if not isinstance(w, dict):
+                continue
             title = w.get("title", "")
             desc = w.get("description", "")
             level = w.get("level", "")
@@ -309,6 +415,11 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
 
     # --- Intervention Prescriptions ---
     ip = sr.get("intervention_prescriptions", [])
+    if isinstance(ip, str):
+        try:
+            ip = json.loads(ip)
+        except (json.JSONDecodeError, TypeError):
+            ip = []
     if ip:
         lines.append("## 干预建议")
         lines.append("")
@@ -323,6 +434,8 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
         }
         by_type: Dict[str, list] = {}
         for p in ip:
+            if not isinstance(p, dict):
+                continue
             t = p.get("type", "other")
             by_type.setdefault(t, []).append(p)
 
@@ -343,10 +456,17 @@ def _build_health_report(sr: Dict[str, Any]) -> str:
 
     # --- Recommended Data Collection ---
     rdc = sr.get("recommended_data_collection", [])
+    if isinstance(rdc, str):
+        try:
+            rdc = json.loads(rdc)
+        except (json.JSONDecodeError, TypeError):
+            rdc = []
     if rdc:
         lines.append("## 建议补充检查")
         lines.append("")
         for r in rdc:
+            if not isinstance(r, dict):
+                continue
             item = r.get("item", "")
             reason = r.get("reason", "")
             priority = r.get("priority", "")
@@ -560,7 +680,7 @@ async def chat_stream(
     )
 
     async def stream_generator():
-        """Generate SSE stream chunks with skill integration."""
+        """Generate SSE stream chunks with skill integration and incremental phase push."""
         try:
             # Send start chunk
             start_chunk = StreamingChatStartChunk(
@@ -602,6 +722,7 @@ async def chat_stream(
 
             # Process through SkillsIntegratedAgent (includes multi-skill orchestration)
             from src.infrastructure.agent.skills_integration import SkillsIntegratedAgent
+            from src.infrastructure.agent.skills_integration import set_phase_callback, clear_phase_callback
             agent = SkillsIntegratedAgent()
 
             # Get previous patient_context from session metadata if available
@@ -609,7 +730,37 @@ async def chat_stream(
             if previous_patient_context:
                 logger.info(f"Restored previous patient context with {len(previous_patient_context.get('vital_signs', {}))} vital signs")
 
+            # Restore previous skill and orchestration phase from session metadata
+            # This ensures follow-up messages (e.g. answering sport_target) don't re-classify intent
+            previous_skill = session.metadata.get("skill_used") if session.metadata else None
+            previous_phase = session.metadata.get("_orchestration_phase") if session.metadata else None
+            if previous_skill:
+                logger.info(f"Restored previous skill from session: {previous_skill}, phase={previous_phase}")
+
+            # Use LLM to extract health data from user message.
+            # This replaces fragile regex-based extraction with intelligent NLU
+            # that can handle sport_target, symptoms, disease severity, etc.
+            try:
+                from src.domain.shared.services.health_data_extractor import (
+                    extract_health_data_from_message,
+                    merge_extracted_into_health_data,
+                )
+                llm_extracted = await asyncio.wait_for(
+                    extract_health_data_from_message(request.message),
+                    timeout=10.0,
+                )
+                if llm_extracted:
+                    if not health_data:
+                        health_data = {}
+                    health_data = merge_extracted_into_health_data(llm_extracted, health_data)
+                    logger.info(f"LLM extraction merged into health_data: {list(health_data.keys())[:10]}")
+            except asyncio.TimeoutError:
+                logger.warning("LLM health data extraction timed out, continuing without it")
+            except Exception as e:
+                logger.warning(f"LLM health data extraction failed: {e}, continuing without it")
+
             # Merge questionnaire answers into health_data if provided
+            # (these are explicit structured answers from the frontend, take precedence)
             has_questionnaire_answers = bool(request.questionnaire_answers)
             if request.questionnaire_answers:
                 from src.infrastructure.agent.nodes.check_basic_questionnaire import map_questionnaire_answers_to_health_data
@@ -617,10 +768,50 @@ async def chat_stream(
                     health_data = {}
                 health_data.update(map_questionnaire_answers_to_health_data(request.questionnaire_answers))
 
+            # Determine suggested_skill and _orchestration_phase
+            suggested_skill = None
+            if previous_skill:
+                # Continuing an ongoing assessment — keep the same skill
+                suggested_skill = previous_skill
+                if not health_data:
+                    health_data = {}
+
+                # If sport_target was extracted by LLM or provided via questionnaire_answers,
+                # bump phase to 3 for Phase 3 execution
+                sport_target = health_data.get("sport_target")
+                if sport_target:
+                    health_data["_orchestration_phase"] = 3
+                    logger.info(f"sport_target detected: '{sport_target}', bumping _orchestration_phase to 3")
+                elif previous_phase:
+                    health_data["_orchestration_phase"] = previous_phase
+            else:
+                # First message in structured assessment flow — use package@assessment
+                # to prevent LLM from classifying to a single-disease skill
+                # (require_basic_questionnaire is always True for streaming chat)
+                suggested_skill = "package@assessment"
+                logger.info("Streaming chat: setting suggested_skill=package@assessment")
+
+            # Create phase queue for incremental SSE push
+            # Each item is (phase_name, phase_label, content, structured_data)
+            phase_queue = asyncio.Queue()
+
+            # Register phase callback that pushes to the queue
+            async def _phase_cb(phase_name, phase_label, content, structured_data):
+                await phase_queue.put((phase_name, phase_label, content, structured_data))
+
+            # Register callback for this session so _execute_package_assessment can use it
+            set_phase_callback(session.session_id, _phase_cb)
+
             # Pass Ping An data to agent if available
             # Add timeout to prevent frontend from showing "thinking" forever
-            try:
-                agent_state = await asyncio.wait_for(
+            logger.info(f"Passing to agent: health_data keys={list(health_data.keys())[:15] if health_data else 'None'}, "
+                        f"sport_target={health_data.get('sport_target') if health_data else 'N/A'}, "
+                        f"_orchestration_phase={health_data.get('_orchestration_phase') if health_data else 'N/A'}, "
+                        f"suggested_skill={suggested_skill}")
+
+            # Run agent.process() in background while consuming phase_queue
+            agent_task = asyncio.create_task(
+                asyncio.wait_for(
                     agent.process(
                         user_input=request.message,
                         patient_id=request.patient_id,
@@ -628,11 +819,55 @@ async def chat_stream(
                         ping_an_health_data=health_data if health_data else None,
                         previous_patient_context=previous_patient_context,  # Pass previous context
                         session_id=session.session_id,  # Pass session_id for memory isolation
+                        suggested_skill=suggested_skill,
                         require_basic_questionnaire=True,
                         questionnaire_answers_submitted=has_questionnaire_answers,
                     ),
-                    timeout=120.0  # 2 minute timeout for the entire agent pipeline
+                    timeout=180.0  # 3 minute timeout for the entire agent pipeline
                 )
+            )
+
+            # Consume phase results from queue and push as SSE phase chunks
+            # Keep reading until agent_task completes and queue is drained
+            phase_results = {}  # Collect all phase data for final structured_result
+            while True:
+                # Check if agent_task is done
+                agent_done = agent_task.done()
+
+                # Try to get from queue (with timeout if agent not done yet)
+                try:
+                    if agent_done:
+                        # Agent done — drain remaining items with timeout
+                        # Use a longer timeout to handle race where callback
+                        # enqueues after agent_task completes
+                        phase_item = await asyncio.wait_for(phase_queue.get(), timeout=2.0)
+                    else:
+                        # Agent still running — wait longer for next phase result
+                        phase_item = await asyncio.wait_for(phase_queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    if agent_done:
+                        # No more items and agent done — exit loop
+                        break
+                    # Agent still running but no phase result yet — continue waiting
+                    continue
+
+                phase_name, phase_label, content, structured_data = phase_item
+                phase_results[phase_name] = structured_data
+                logger.info(f"Consumed phase from queue: {phase_name} ({phase_label}), phase_results keys={list(phase_results.keys())}")
+
+                # Push phase SSE chunk
+                phase_chunk = StreamingChatPhaseChunk(
+                    phase_name=phase_name,
+                    phase_label=phase_label,
+                    content=content,
+                    structured_data=structured_data,
+                )
+                yield f"data: {phase_chunk.model_dump_json()}\n\n"
+                logger.info(f"Pushed phase chunk: {phase_name} ({phase_label})")
+
+            # Get agent result
+            try:
+                agent_state = agent_task.result()
             except asyncio.TimeoutError:
                 logger.error(f"Agent process timed out after 120s for session {session.session_id}")
                 # Send error and end events so frontend stops showing "thinking"
@@ -649,24 +884,43 @@ async def chat_stream(
                     confidence=0.0,
                 )
                 yield f"data: {end_chunk.model_dump_json()}\n\n"
+                clear_phase_callback(session.session_id)
                 return
+            except Exception as e:
+                import traceback as _tb
+                tb_str = _tb.format_exc()
+                logger.error(f"Agent process failed: {e}\n{tb_str}")
+                error_chunk = StreamingChatErrorChunk(
+                    type="error",
+                    error=str(e)
+                )
+                yield f"data: {error_chunk.model_dump_json()}\n\n"
+                clear_phase_callback(session.session_id)
+                return
+
+            # Clear phase callback
+            clear_phase_callback(session.session_id)
+
             logger.info(f"Agent processing complete: intent={agent_state.intent}, skill={agent_state.suggested_skill}, confidence={agent_state.confidence}")
 
             # Extract structured_result from agent state (same logic as assessment.py)
             structured_result = _extract_structured_result(agent_state)
 
+            # Merge phase_results (from incremental SSE push) into structured_result
+            # Phase results contain the authoritative data from each phase execution,
+            # while agent_state.structured_output may be incomplete or different.
+            if phase_results:
+                for key, value in phase_results.items():
+                    if isinstance(value, dict) and isinstance(structured_result.get(key), dict):
+                        structured_result[key].update(value)
+                    else:
+                        structured_result[key] = value
+                logger.info(f"Merged {len(phase_results)} phase results into structured_result: {list(phase_results.keys())}")
+
             # Transform abnormal_indicators into indicators + warnings
             transform_abnormal_indicators(structured_result)
 
-            # LLM 生成个性化处方
-            try:
-                from src.domain.shared.services.prescription_generator import generate_prescriptions
-                if structured_result:
-                    structured_result["intervention_prescriptions"] = await generate_prescriptions(
-                        structured_result, health_data or {}
-                    )
-            except Exception as e:
-                logger.warning(f"Prescription generation failed in streaming, keeping script defaults: {e}")
+            # LLM risk-warning and prescription-recommendation are now executed via LangGraph pipeline (Phase 3.5)
 
             # Extract response and metadata from agent state
             skill_used = agent_state.suggested_skill
@@ -703,14 +957,30 @@ async def chat_stream(
                 so["current_question"] = current_q
                 logger.info(f"Built current_question for missing_basic_info: id={current_q.get('id') if current_q else None}")
 
-            # Build report: prefer modules markdown for package assessment, then structured_result report
+            # Build report: questionnaire markdown > modules markdown > structured_result report > fallback
             so = getattr(agent_state, 'structured_output', None)
-            if isinstance(so, dict) and so.get("modules"):
+            if isinstance(so, dict) and so.get("status") in ("missing_basic_info", "goal_selection"):
+                # Convert questionnaire current_question to markdown for chat rendering
+                current_q = so.get("current_question", {})
+                if current_q:
+                    full_response = _format_questionnaire_to_markdown(current_q)
+                    logger.info(f"Using questionnaire markdown as response (status={so.get('status')}, q_id={current_q.get('id')})")
+                else:
+                    full_response = agent_state.final_response or "请提供更多信息以继续评估。"
+            elif isinstance(so, dict) and so.get("modules"):
                 # Use skill raw modules markdown (structured markdown for SSE)
                 full_response = _format_modules_to_markdown(so["modules"])
                 logger.info("Using modules-based markdown as response")
-            elif structured_result and structured_result.get("population_classification", {}).get("primary_category") not in ("", None):
-                full_response = _build_health_report(structured_result)
+            elif structured_result and isinstance(structured_result, dict):
+                pc = structured_result.get("population_classification", {})
+                if isinstance(pc, str):
+                    try:
+                        pc = json.loads(pc)
+                    except (json.JSONDecodeError, TypeError):
+                        pc = {}
+                category = pc.get("primary_category", "") if isinstance(pc, dict) else ""
+                if category not in ("", None):
+                    full_response = _build_health_report(structured_result)
                 logger.info("Using structured report as response")
             else:
                 full_response = agent_state.final_response or "抱歉，我无法生成回复。"
@@ -749,11 +1019,39 @@ async def chat_stream(
                 session.metadata["patient_context"] = patient_context_dict
                 logger.info(f"Saved patient_context to session with {len(agent_state.patient_context.vital_signs)} vital signs")
 
+            # Save skill_used and _orchestration_phase to session metadata
+            # so follow-up messages preserve the ongoing assessment context
+            if skill_used:
+                if not session.metadata:
+                    session.metadata = {}
+                session.metadata["skill_used"] = skill_used
+
+            # Determine _orchestration_phase to save:
+            # - If structured_output has _orchestration_phase, use that (Phase 2 case)
+            # - If Phase 3 completed (structured_result has population_classification + modules), save phase=3
+            so = getattr(agent_state, 'structured_output', None)
+            phase_to_save = None
+            if isinstance(so, dict) and "_orchestration_phase" in so:
+                phase_to_save = so["_orchestration_phase"]
+            elif isinstance(so, dict) and so.get("modules") and structured_result:
+                # Phase 3 completed — save phase 3 so follow-up messages don't re-enter Phase 1/2
+                phase_to_save = 3
+                logger.info("Phase 3 completed, saving _orchestration_phase=3 to session metadata")
+            if phase_to_save:
+                if not session.metadata:
+                    session.metadata = {}
+                session.metadata["_orchestration_phase"] = phase_to_save
+                logger.info(f"Saved _orchestration_phase={phase_to_save} to session metadata")
+
             # Stream the response word by word for better UX
-            words = full_response.split()
-            for word in words:
-                yield f"data: {json.dumps({'type': 'token', 'content': word + ' '}, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.02)  # Small delay for streaming effect
+            # Skip token streaming if phase chunks already pushed the full report incrementally
+            if phase_results:
+                logger.info("Phase results already pushed incrementally, skipping token streaming")
+            else:
+                words = full_response.split()
+                for word in words:
+                    yield f"data: {json.dumps({'type': 'token', 'content': word + ' '}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.02)  # Small delay for streaming effect
 
             # Add assistant message to session (this will save to disk with patient_context included)
             # Include multi-skill metadata if available
@@ -778,10 +1076,20 @@ async def chat_stream(
                 metadata=assistant_metadata
             )
 
+            # When phase results were pushed, send empty full_response in end chunk
+            # so the frontend uses accumulatedContent (from phase chunks) instead of
+            # questionnaire markdown like "(1/8)"
+            # Also send empty full_response for missing_basic_info and goal_selection:
+            # the questionnaire is rendered from structured_output, not from text content.
+            so_status = getattr(agent_state, 'structured_output', None)
+            is_questionnaire_status = isinstance(so_status, dict) and so_status.get("status") in ("missing_basic_info", "goal_selection")
+            end_full_response = "" if (phase_results or is_questionnaire_status) else full_response
+            logger.info(f"End chunk: phase_results={list(phase_results.keys())}, end_full_response length={len(end_full_response)}")
+
             # Send end chunk
             end_chunk = StreamingChatEndChunk(
                 type="end",
-                full_response=full_response,
+                full_response=end_full_response,
                 intent=intent,
                 confidence=confidence,
                 suggested_skill=skill_used,
@@ -796,20 +1104,33 @@ async def chat_stream(
             # Build extra fields to inject
             extra_fields = []
             if isinstance(so, dict):
-                extra_fields.append(f'"structured_output":{json.dumps(so, ensure_ascii=False)}')
+                try:
+                    extra_fields.append(f'"structured_output":{json.dumps(so, ensure_ascii=False, default=str)}')
+                except (ValueError, TypeError):
+                    extra_fields.append(f'"structured_output":{{}}')
             if structured_result:
-                extra_fields.append(f'"structured_result":{json.dumps(structured_result, ensure_ascii=False)}')
+                try:
+                    extra_fields.append(f'"structured_result":{json.dumps(structured_result, ensure_ascii=False, default=str)}')
+                except (ValueError, TypeError):
+                    extra_fields.append(f'"structured_result":{{}}')
             if extra_fields:
                 end_json = end_json[:-1] + ',' + ','.join(extra_fields) + '}'
             yield f"data: {end_json}\n\n"
 
         except Exception as e:
-            logger.error(f"Error in stream generator: {e}", exc_info=True)
+            import traceback as _tb
+            tb_str = _tb.format_exc()
+            logger.error(f"Error in stream generator: {e}\n{tb_str}")
             error_chunk = StreamingChatErrorChunk(
                 type="error",
                 error=str(e)
             )
             yield f"data: {error_chunk.model_dump_json()}\n\n"
+            # Clean up phase callback on error
+            try:
+                clear_phase_callback(session.session_id)
+            except Exception:
+                pass
 
     return StreamingResponse(
         stream_generator(),

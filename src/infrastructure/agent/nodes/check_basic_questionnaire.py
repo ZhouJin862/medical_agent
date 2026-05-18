@@ -76,6 +76,20 @@ def map_questionnaire_answers_to_health_data(
                     result["diseaseLabels"] = labels
                     result["disease_severity"] = severity_map
                 continue
+            # disease-history: single string value (e.g. "hypertension") from simple select
+            if q_id == "disease-history" and isinstance(value, str):
+                result["diseaseLabels"] = [value]
+                continue
+            # symptoms: [["headache", "mild"], ...] → extract symptom names
+            if q_id == "symptoms" and isinstance(value, list):
+                symptom_labels = []
+                for item in value:
+                    if isinstance(item, list) and len(item) >= 1:
+                        symptom_labels.append(item[0])
+                    elif isinstance(item, str):
+                        symptom_labels.append(item)
+                result["symptoms"] = symptom_labels
+                continue
             # special_disease: ["胃癌", ...] → append to diseaseLabels
             if q_id == "special_disease" and isinstance(value, list):
                 existing = result.get("diseaseLabels", [])
@@ -186,6 +200,90 @@ def _include_intro_for_questions(
     return result
 
 
+def _build_missing_required_items(state: AgentState) -> List[Dict[str, Any]]:
+    """Build required data items from state.missing_basic_fields.
+
+    state.missing_basic_fields may contain either question IDs (e.g.
+    "gender-select") or field keys (e.g. "gender") depending on the code
+    path, so we map both.
+    """
+    if not state.missing_basic_fields:
+        return []
+
+    # Map both question IDs and field keys to human-readable labels
+    _LABELS: Dict[str, str] = {
+        # Question IDs
+        "gender-select": "性别",
+        "q_age_picker": "年龄",
+        "height-input": "身高",
+        "weight-input": "体重",
+        "disease-history": "疾病史",
+        "symptoms": "症状",
+        # Field keys (from QUESTIONNAIRE_FIELD_MAP values)
+        "gender": "性别",
+        "age": "年龄",
+        "height": "身高",
+        "weight": "体重",
+        "disease_labels": "疾病史",
+    }
+
+    items = []
+    for field in state.missing_basic_fields:
+        if field in _LABELS:
+            items.append({
+                "item": _LABELS[field],
+                "reason": f"缺少必填数据：{_LABELS[field]}",
+                "priority": "required",
+            })
+    return items
+
+
+async def _push_population_classification(state: AgentState) -> None:
+    """Execute population-classification skill and push result via phase callback.
+
+    Called before returning missing_basic_info so the frontend can display
+    the population group even while the questionnaire is still incomplete.
+    """
+    session_id = state.session_id if hasattr(state, 'session_id') and state.session_id else None
+    if not session_id:
+        return
+
+    try:
+        from src.infrastructure.agent.skills_integration import get_phase_callback
+        cb = get_phase_callback(session_id)
+        if not cb:
+            return
+
+        from src.infrastructure.agent.skills_integration import _execute_single_skill_for_orchestration, _extract_modules, _build_phase_markdown
+        from src.infrastructure.database import get_db_session
+
+        async for session in get_db_session():
+            pop_result = await _execute_single_skill_for_orchestration(
+                session, state, "population-classification"
+            )
+            if pop_result:
+                pop_structured = _extract_modules(pop_result)
+                if pop_structured:
+                    modules = pop_structured.get("modules", {})
+                    pc = modules.get("population_classification", modules.get("population_group", {}))
+                    sr = pop_structured.get("structured_result") or (isinstance(pop_result, dict) and pop_result.get("structured_result"))
+                    if isinstance(sr, dict) and sr.get("population_classification"):
+                        pc = sr["population_classification"]
+                    if pc:
+                        await cb(
+                            "population_classification",
+                            "人群分类",
+                            _build_phase_markdown("population_classification", {"population_classification": pc}),
+                            {"population_classification": pc},
+                        )
+                        logger.info(f"Pushed population_classification via callback: primary_category={pc.get('primary_category')}")
+                    # Skip raw recommended_data_collection push in Phase 1/2
+                    # Phase 3 will push LLM-ranked results with critical/important/optional priorities
+            break  # Only use first session
+    except Exception as e:
+        logger.warning(f"Failed to push population_classification before missing_basic_info: {e}")
+
+
 async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
     """
     Check if required basic questionnaire fields are present in patient_context.
@@ -202,6 +300,20 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
     if not state.require_basic_questionnaire:
         state.missing_basic_fields = None
         logger.info("check_basic_questionnaire: gate disabled, skipping")
+        return state
+
+    # 1b. Gate: skip if we're already past Phase 2 (goal selection done)
+    # When _orchestration_phase >= 3, basic info was already collected
+    health_data = state.ping_an_health_data or {}
+    phase = health_data.get("_orchestration_phase", 0)
+    # Also check patient_context for sport_target (indicates Phase 2 completed)
+    if phase < 3 and state.patient_context:
+        basic_info = getattr(state.patient_context, 'basic_info', None)
+        if isinstance(basic_info, dict) and basic_info.get("sport_target"):
+            phase = 3
+    if phase >= 3:
+        state.missing_basic_fields = []
+        logger.info(f"check_basic_questionnaire: skipping because _orchestration_phase={phase} (past goal selection)")
         return state
 
     state.current_step = "check_basic_questionnaire"
@@ -270,6 +382,7 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
             "recommended_data_collection": recommended_data_collection,
             "questions": questions,  # Full pages including intro
         }
+        await _push_population_classification(state)
         return state
 
     # Check each required field against patient_context
@@ -325,6 +438,7 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
             "questions": return_questions,
         }
         logger.info("All required fields present, but disease-history missing — returning it")
+        await _push_population_classification(state)
         return state
 
     # disease-history answered empty (no diseases) + symptoms not answered → ask symptoms
@@ -352,6 +466,7 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
             "questions": return_questions,
         }
         logger.info("No diseases selected — returning symptoms question")
+        await _push_population_classification(state)
         return state
 
     # 6. Determine return strategy based on health archive data availability
@@ -415,4 +530,5 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
         "questions": return_questions,
     }
 
+    await _push_population_classification(state)
     return state

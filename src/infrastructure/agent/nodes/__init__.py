@@ -280,7 +280,7 @@ def _map_ping_an_flat_fields_to_vital_signs(api_data: Dict[str, Any]) -> Dict[st
             mapped_api_fields.add(api_field)
 
     # Second pass: preserve all unmapped raw API fields (age, gender, and any future fields)
-    _INTERNAL_META_KEYS = {"_api_response", "_metadata", "diseaseLabels", "_dh_explicit_empty", "symptoms", "disease_severity"}
+    _INTERNAL_META_KEYS = {"_api_response", "_metadata", "diseaseLabels", "_dh_explicit_empty", "symptoms", "disease_severity", "sport_target", "_orchestration_phase", "_population_result", "_seen_intro_pages"}
     for api_field, value in api_data.items():
         if api_field in _INTERNAL_META_KEYS:
             continue
@@ -482,6 +482,20 @@ def _extract_vital_signs_from_user_input(user_input: str, existing_vital_signs: 
         (r'(\d+)\s*岁', '_age', int),
         (r'年龄[:：]\s*(\d+)', '_age', int),
 
+        # 性别 - Gender
+        (r'男性|男|male|man', '_gender', lambda m: 'male'),
+        (r'女性|女|female|woman', '_gender', lambda m: 'female'),
+
+        # 疾病史 - Disease labels from natural language
+        (r'确诊(?:了?)?(?:高血压|血压高)', '_disease_hypertension', lambda m: True),
+        (r'高血压', '_disease_hypertension', lambda m: True),
+        (r'确诊(?:了?)?(?:糖尿病|血糖高)', '_disease_diabetes', lambda m: True),
+        (r'糖尿病', '_disease_diabetes', lambda m: True),
+        (r'确诊(?:了?)?(?:高血脂|血脂异常|血脂高)', '_disease_hyperlipidemia', lambda m: True),
+        (r'高血脂', '_disease_hyperlipidemia', lambda m: True),
+        (r'确诊(?:了?)?(?:高尿酸|痛风)', '_disease_hyperuricemia', lambda m: True),
+        (r'确诊(?:了?)?(?:心脏病|冠心病|心血管病)', '_disease_heart', lambda m: True),
+
         # 血压相关 - Blood Pressure (more flexible to handle parentheses and extra text)
         (r'(?:收缩压|高压|systolic|sbp)(?:[（(][^)）]*[)）])?[:：\s]*(\d+(?:\.\d+)?)\s*(?:mmhg)?', 'systolic_bp', float),
         (r'(?:舒张压|低压|diastolic|dbp)(?:[（(][^)）]*[)）])?[:：\s]*(\d+(?:\.\d+)?)\s*(?:mmhg)?', 'diastolic_bp', float),
@@ -518,6 +532,16 @@ def _extract_vital_signs_from_user_input(user_input: str, existing_vital_signs: 
                 vital_signs['diastolic_bp'] = diastolic
                 logger.info(f"Extracted BP: {systolic}/{diastolic}")
                 extracted_count += 2
+            elif field_name.startswith('_gender'):
+                # Gender extraction - converter takes match object
+                vital_signs['_extracted_gender'] = converter(match)
+                logger.info(f"Extracted gender: {vital_signs['_extracted_gender']}")
+                extracted_count += 1
+            elif field_name.startswith('_disease_'):
+                # Disease label extraction - mark as present
+                vital_signs[field_name] = True
+                logger.info(f"Extracted disease: {field_name}")
+                extracted_count += 1
             else:
                 # For other fields, extract the captured group and convert it
                 captured_value = match.group(1)
@@ -635,7 +659,13 @@ async def load_patient_node(state: AgentState) -> AgentState:
 
     if use_previous_context:
         logger.info("Using previous patient context as base (same party_id)")
-        patient_data = state.previous_patient_context.get("basic_info", {}).copy()
+        patient_data = {
+            "basic_info": state.previous_patient_context.get("basic_info", {}).copy(),
+            "patient_id": state.patient_id,
+            "party_id": state.previous_patient_context.get("basic_info", {}).get("party_id"),
+            "source": state.previous_patient_context.get("basic_info", {}).get("source"),
+            "has_health_data": bool(state.previous_patient_context.get("vital_signs")),
+        }
         vital_signs = state.previous_patient_context.get("vital_signs", {}).copy()
         medical_records = state.previous_patient_context.get("medical_history", {}).copy()
 
@@ -711,115 +741,139 @@ async def load_patient_node(state: AgentState) -> AgentState:
                     medical_records["disease_labels"] = api_data["diseaseLabels"]
         else:
             logger.info(f"Using pre-fetched Ping An health data from streaming_chat")
-        api_data = state.ping_an_health_data
-        party_id = state.party_id
+            api_data = state.ping_an_health_data
+            party_id = state.party_id
 
-        # Build basic_info from Ping An data
-        basic_info = {"patient_id": state.patient_id, "party_id": party_id, "source": "ping_an_api"}
-        # Extract age from multiple possible field names (direct fields)
-        # IMPORTANT: Convert age to integer (Ping An API returns string)
-        age_found = False
-        for age_field in ["age", "customerAge", "patientAge", "personAge", "userAge"]:
-            if age_field in api_data and api_data[age_field]:
-                basic_info["age"] = int(str(api_data[age_field]).strip())
-                logger.info(f"Found age in field '{age_field}': {api_data[age_field]} -> {basic_info['age']}")
-                age_found = True
-                break
-        # Also check nested structures (e.g., personInfo.age, customer.age)
-        if not age_found:
-            for nested_key in ["personInfo", "customer", "customerInfo", "patientInfo", "basicInfo"]:
-                if nested_key in api_data and isinstance(api_data[nested_key], dict):
-                    if "age" in api_data[nested_key]:
-                        basic_info["age"] = int(str(api_data[nested_key]["age"]).strip())
-                        logger.info(f"Found age in nested field '{nested_key}.age': {api_data[nested_key]['age']} -> {basic_info['age']}")
+            # Check if api_data contains actual health data (vital signs, indicators)
+            # vs just metadata fields (sport_target, _orchestration_phase, etc.)
+            _HEALTH_DATA_FIELDS = {
+                "systolicPressure", "diastolicPressure", "fastingBloodGlucose",
+                "hbalc", "tc", "tg", "ldlc", "hdlc", "bloodUricAcid",
+                "height", "weight", "waistCircumference", "bmi",
+                "indicatorItems", "cycleItems", "diseaseHistory",
+                "diseaseLabels", "age", "gender",
+            }
+            has_actual_health_data = any(f in api_data for f in _HEALTH_DATA_FIELDS)
+
+            if has_actual_health_data:
+                # Full Ping An data — build patient context from it
+                # Build basic_info from Ping An data
+                basic_info = {"patient_id": state.patient_id, "party_id": party_id, "source": "ping_an_api"}
+                # Extract age from multiple possible field names (direct fields)
+                # IMPORTANT: Convert age to integer (Ping An API returns string)
+                age_found = False
+                for age_field in ["age", "customerAge", "patientAge", "personAge", "userAge"]:
+                    if age_field in api_data and api_data[age_field]:
+                        basic_info["age"] = int(str(api_data[age_field]).strip())
+                        logger.info(f"Found age in field '{age_field}': {api_data[age_field]} -> {basic_info['age']}")
                         age_found = True
                         break
+                # Also check nested structures (e.g., personInfo.age, customer.age)
+                if not age_found:
+                    for nested_key in ["personInfo", "customer", "customerInfo", "patientInfo", "basicInfo"]:
+                        if nested_key in api_data and isinstance(api_data[nested_key], dict):
+                            if "age" in api_data[nested_key]:
+                                basic_info["age"] = int(str(api_data[nested_key]["age"]).strip())
+                                logger.info(f"Found age in nested field '{nested_key}.age': {api_data[nested_key]['age']} -> {basic_info['age']}")
+                                age_found = True
+                                break
 
-        # Extract gender if available (normalize F/M to female/male)
-        if "gender" in api_data and api_data["gender"]:
-            g = str(api_data["gender"]).strip().upper()
-            if g in ("F", "FEMALE", "女"):
-                basic_info["gender"] = "female"
-            elif g in ("M", "MALE", "男"):
-                basic_info["gender"] = "male"
+                # Extract gender if available (normalize F/M to female/male)
+                if "gender" in api_data and api_data["gender"]:
+                    g = str(api_data["gender"]).strip().upper()
+                    if g in ("F", "FEMALE", "女"):
+                        basic_info["gender"] = "female"
+                    elif g in ("M", "MALE", "男"):
+                        basic_info["gender"] = "male"
+                    else:
+                        basic_info["gender"] = api_data["gender"]
+
+                # Extract diseaseLabels (new field with disease names)
+                # Only set if key exists in api_data — distinguish "not provided" from "empty list"
+                # If api_data doesn't have diseaseLabels, preserve any disease_labels from previous context
+                if "diseaseLabels" in api_data:
+                    disease_labels = api_data.get("diseaseLabels")
+                elif "disease_labels" in medical_records:
+                    disease_labels = medical_records["disease_labels"]
+                else:
+                    disease_labels = None
+
+                # Detect API response format: indicatorItems vs cycleItems vs flat fields
+                if "indicatorItems" in api_data:
+                    # Old format: indicatorItems array
+                    vital_signs = _map_ping_an_indicators_to_vital_signs(api_data.get("indicatorItems", []))
+                    diagnoses = []
+                    if "diseaseHistory" in api_data:
+                        diagnoses = [{"code": code} for code in api_data["diseaseHistory"]]
+                    medical_records = {
+                        "diagnoses": diagnoses,
+                        "medications": api_data.get("medications", []),
+                        "allergies": api_data.get("allergies", []),
+                        "chronic_diseases": diagnoses,
+                        "disease_labels": disease_labels,
+                        "sport_records": api_data.get("sportRecords", {}),
+                        "symptoms": api_data.get("symptoms"),
+                    }
+                elif "cycleItems" in api_data and isinstance(api_data["cycleItems"], list):
+                    # Ping An Health Archive cycleItems format: {itemName, itemValue} pairs
+                    vital_signs = _map_cycle_items_to_vital_signs(api_data["cycleItems"])
+                    # Also pick up any flat fields at top level (e.g. if API returns both)
+                    flat_vs = _map_ping_an_flat_fields_to_vital_signs(api_data)
+                    for k, v in flat_vs.items():
+                        if k not in vital_signs and v is not None:
+                            vital_signs[k] = v
+                    diagnoses = []
+                    if "diseaseHistory" in api_data:
+                        diagnoses = [{"code": code} for code in api_data["diseaseHistory"]]
+                    medical_records = {
+                        "diagnoses": diagnoses,
+                        "medications": api_data.get("medications", []),
+                        "allergies": api_data.get("allergies", []),
+                        "chronic_diseases": diagnoses,
+                        "disease_labels": disease_labels,
+                        "sport_records": api_data.get("sportRecords", {}),
+                        "symptoms": api_data.get("symptoms"),
+                    }
+                else:
+                    # New format: flat fields (systolicPressure, diastolicPressure, etc.)
+                    vital_signs = _map_ping_an_flat_fields_to_vital_signs(api_data)
+                    diagnoses = []
+                    if "diseaseHistory" in api_data:
+                        diagnoses = [{"code": code} for code in api_data["diseaseHistory"]]
+                    medical_records = {
+                        "diagnoses": diagnoses,
+                        "medications": api_data.get("medications", []),
+                        "allergies": api_data.get("allergies", []),
+                        "chronic_diseases": diagnoses,
+                        "disease_labels": disease_labels,
+                        "sport_records": api_data.get("sportRecords", {}),
+                        "symptoms": api_data.get("symptoms"),
+                    }
+
+                patient_data = {
+                    "basic_info": basic_info,
+                    "patient_id": state.patient_id,
+                    "party_id": party_id,
+                    "source": "ping_an_api",
+                    "has_health_data": True,
+                }
+
+                logger.info(f"Successfully loaded pre-fetched health data from Ping An API for party_id: {party_id}")
+                logger.info(f"  - Age: {api_data.get('age', 'N/A')}, Gender: {api_data.get('gender', 'N/A')}")
+                logger.info(f"  - Vital signs: {list(vital_signs.keys())}")
+                logger.info(f"  - Diagnoses: {len(diagnoses)} conditions")
+                logger.info(f"  - Disease labels: {disease_labels}")
             else:
-                basic_info["gender"] = api_data["gender"]
-
-        # Extract diseaseLabels (new field with disease names)
-        # Only set if key exists in api_data — distinguish "not provided" from "empty list"
-        # If api_data doesn't have diseaseLabels, preserve any disease_labels from humanQuery merge
-        if "diseaseLabels" in api_data:
-            disease_labels = api_data.get("diseaseLabels")
-        elif "disease_labels" in medical_records:
-            disease_labels = medical_records["disease_labels"]
-        else:
-            disease_labels = None
-
-        # Detect API response format: indicatorItems vs cycleItems vs flat fields
-        if "indicatorItems" in api_data:
-            # Old format: indicatorItems array
-            vital_signs = _map_ping_an_indicators_to_vital_signs(api_data.get("indicatorItems", []))
-            diagnoses = []
-            if "diseaseHistory" in api_data:
-                diagnoses = [{"code": code} for code in api_data["diseaseHistory"]]
-            medical_records = {
-                "diagnoses": diagnoses,
-                "medications": api_data.get("medications", []),
-                "allergies": api_data.get("allergies", []),
-                "chronic_diseases": diagnoses,
-                "disease_labels": disease_labels,
-                "sport_records": api_data.get("sportRecords", {}),
-                "symptoms": api_data.get("symptoms"),
-            }
-        elif "cycleItems" in api_data and isinstance(api_data["cycleItems"], list):
-            # Ping An Health Archive cycleItems format: {itemName, itemValue} pairs
-            vital_signs = _map_cycle_items_to_vital_signs(api_data["cycleItems"])
-            # Also pick up any flat fields at top level (e.g. if API returns both)
-            flat_vs = _map_ping_an_flat_fields_to_vital_signs(api_data)
-            for k, v in flat_vs.items():
-                if k not in vital_signs and v is not None:
-                    vital_signs[k] = v
-            diagnoses = []
-            if "diseaseHistory" in api_data:
-                diagnoses = [{"code": code} for code in api_data["diseaseHistory"]]
-            medical_records = {
-                "diagnoses": diagnoses,
-                "medications": api_data.get("medications", []),
-                "allergies": api_data.get("allergies", []),
-                "chronic_diseases": diagnoses,
-                "disease_labels": disease_labels,
-                "sport_records": api_data.get("sportRecords", {}),
-                "symptoms": api_data.get("symptoms"),
-            }
-        else:
-            # New format: flat fields (systolicPressure, diastolicPressure, etc.)
-            vital_signs = _map_ping_an_flat_fields_to_vital_signs(api_data)
-            diagnoses = []
-            if "diseaseHistory" in api_data:
-                diagnoses = [{"code": code} for code in api_data["diseaseHistory"]]
-            medical_records = {
-                "diagnoses": diagnoses,
-                "medications": api_data.get("medications", []),
-                "allergies": api_data.get("allergies", []),
-                "chronic_diseases": diagnoses,
-                "disease_labels": disease_labels,
-                "sport_records": api_data.get("sportRecords", {}),
-                "symptoms": api_data.get("symptoms"),
-            }
-
-        patient_data = {
-            "basic_info": basic_info,
-            "patient_id": state.patient_id,
-            "party_id": party_id,
-            "source": "ping_an_api",
-            "has_health_data": True,
-        }
-
-        logger.info(f"Successfully loaded pre-fetched health data from Ping An API for party_id: {party_id}")
-        logger.info(f"  - Age: {api_data.get('age', 'N/A')}, Gender: {api_data.get('gender', 'N/A')}")
-        logger.info(f"  - Vital signs: {list(vital_signs.keys())}")
-        logger.info(f"  - Diagnoses: {len(diagnoses)} conditions")
-        logger.info(f"  - Disease labels: {disease_labels}")
+                # ping_an_health_data only contains metadata fields (sport_target, _orchestration_phase)
+                # Preserve existing vital_signs and medical_records from previous_patient_context
+                logger.info(f"ping_an_health_data contains only metadata, preserving previous context data")
+                # Extract sport_target and _orchestration_phase from api_data
+                # (these are set by streaming_chat.py for phase tracking)
+                if "sport_target" in api_data and api_data["sport_target"]:
+                    patient_data.setdefault("basic_info", {})["sport_target"] = api_data["sport_target"]
+                    logger.info(f"Extracted sport_target from metadata: {api_data['sport_target']}")
+                # _orchestration_phase is read by skills_integration.py from state.ping_an_health_data
+                # so it doesn't need to be stored in vital_signs
 
     else:
         # No pre-fetched data, try to load from MCP
@@ -930,16 +984,108 @@ async def load_patient_node(state: AgentState) -> AgentState:
         except Exception as e:
             logger.warning(f"Failed to load patient data from MCP: {e}, using fallback")
 
-    # Extract and merge vital signs from user input (for follow-up messages)
-    # This allows users to provide missing data in subsequent messages
-    vital_signs = _extract_vital_signs_from_user_input(state.user_input, vital_signs)
+    # --- LLM-based health data extraction from user input ---
+    # Use LLM to extract all health data (age, gender, sport_target, vital signs,
+    # diseases, symptoms, etc.) from the user's message. Falls back to regex
+    # extraction if LLM fails or times out.
+    llm_extracted = {}
+    try:
+        from src.domain.shared.services.health_data_extractor import extract_health_data_from_message
+        import asyncio as _asyncio
+        llm_extracted = await _asyncio.wait_for(
+            extract_health_data_from_message(state.user_input),
+            timeout=10.0,
+        )
+    except Exception as e:
+        logger.warning(f"LLM health data extraction failed in load_patient_node: {e}")
 
-    # Check if age was extracted from user input
+    if llm_extracted:
+        # Merge LLM-extracted basic_info into patient_data
+        # IMPORTANT: User-provided data (LLM extraction) takes precedence over Ping An data
+        # because the user is telling us their CURRENT values right now.
+        llm_basic = llm_extracted.get("basic_info", {})
+        for k, v in llm_basic.items():
+            if v is not None and v != "":
+                # User-provided data overrides Ping An / previous context
+                patient_data.setdefault("basic_info", {})[k] = v
+                logger.info(f"LLM extracted basic_info.{k}: {v} (overrides any existing value)")
+
+        # Merge LLM-extracted vital_signs
+        # User-provided vital signs take precedence over Ping An data
+        llm_vs = llm_extracted.get("vital_signs", {})
+        for k, v in llm_vs.items():
+            if v is not None:
+                vital_signs[k] = v
+                logger.info(f"LLM extracted vital_signs.{k}: {v} (overrides any existing value)")
+
+        # Merge LLM-extracted medical_history
+        llm_mh = llm_extracted.get("medical_history", {})
+        if "disease_labels" in llm_mh and llm_mh["disease_labels"]:
+            existing_labels = medical_records.get("disease_labels", [])
+            if not isinstance(existing_labels, list):
+                existing_labels = []
+            merged_labels = list(set(existing_labels + llm_mh["disease_labels"]))
+            medical_records["disease_labels"] = merged_labels
+            logger.info(f"LLM extracted disease_labels: {merged_labels}")
+        if "disease_severity" in llm_mh:
+            medical_records["disease_severity"] = llm_mh["disease_severity"]
+        if "symptoms" in llm_mh and llm_mh["symptoms"]:
+            medical_records["symptoms"] = llm_mh["symptoms"]
+            logger.info(f"LLM extracted symptoms: {llm_mh['symptoms']}")
+    else:
+        # Fallback: regex-based extraction (only if LLM didn't extract anything)
+        vital_signs = _extract_vital_signs_from_user_input(state.user_input, vital_signs)
+
+    # Ensure patient_data has basic_info dict (even if no Ping An data)
+    if not patient_data:
+        patient_data = {}
+    if 'basic_info' not in patient_data or not isinstance(patient_data.get('basic_info'), dict):
+        patient_data['basic_info'] = patient_data.get('basic_info', {}) or {}
+
+    # Handle regex-extracted age/gender (from fallback path)
     if '_extracted_age' in vital_signs:
         extracted_age = vital_signs.pop('_extracted_age')
-        if patient_data and 'basic_info' in patient_data:
+        if 'age' not in patient_data['basic_info'] or patient_data['basic_info']['age'] is None:
             patient_data['basic_info']['age'] = extracted_age
             logger.info(f"Extracted age from user input: {extracted_age}")
+
+    if '_extracted_gender' in vital_signs:
+        extracted_gender = vital_signs.pop('_extracted_gender')
+        if 'gender' not in patient_data['basic_info'] or patient_data['basic_info']['gender'] is None:
+            patient_data['basic_info']['gender'] = extracted_gender
+            logger.info(f"Extracted gender from user input: {extracted_gender}")
+
+    # Handle regex-extracted disease labels (from fallback path)
+    _DISEASE_FIELD_MAP = {
+        '_disease_hypertension': 'hypertension',
+        '_disease_diabetes': 'diabetes',
+        '_disease_hyperlipidemia': 'hyperlipidemia',
+        '_disease_hyperuricemia': 'hyperuricemia',
+        '_disease_heart': 'heart_disease',
+    }
+    extracted_diseases = []
+    for field, label in _DISEASE_FIELD_MAP.items():
+        if field in vital_signs:
+            vital_signs.pop(field)
+            extracted_diseases.append(label)
+            logger.info(f"Extracted disease from user input: {label}")
+    if extracted_diseases:
+        existing_labels = medical_records.get('disease_labels', []) if medical_records else []
+        if isinstance(existing_labels, list):
+            merged = list(set(existing_labels + extracted_diseases))
+            medical_records['disease_labels'] = merged
+        else:
+            medical_records['disease_labels'] = extracted_diseases
+        logger.info(f"Merged disease_labels: {medical_records['disease_labels']}")
+
+    # Extract sport_target from ping_an_health_data (set by streaming_chat.py
+    # when LLM extraction or questionnaire_answers provided it)
+    if state.ping_an_health_data and "sport_target" in state.ping_an_health_data:
+        sport_target = state.ping_an_health_data["sport_target"]
+        if sport_target:
+            if 'sport_target' not in patient_data.get('basic_info', {}) or patient_data['basic_info'].get('sport_target') is None:
+                patient_data.setdefault('basic_info', {})['sport_target'] = sport_target
+                logger.info(f"Extracted sport_target from health_data: {sport_target}")
 
     # Create patient context
     state.patient_context = PatientContext(

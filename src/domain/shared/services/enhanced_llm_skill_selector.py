@@ -86,6 +86,13 @@ class EnhancedLLMSkillSelector:
             conversation_context=conversation_context,
         )
 
+        # If LLM returned no skill, try keyword fallback
+        if not selection.primary and not selection.secondary:
+            logger.info("LLM returned no skill, trying keyword fallback")
+            fallback_selection = self._fallback_select(user_input, skill_descriptions)
+            if fallback_selection.primary or fallback_selection.secondary:
+                selection = fallback_selection
+
         # Analyze relationships between selected skills
         if selection.has_multiple_skills:
             selection.relationships = await self._analyze_relationships(
@@ -191,6 +198,10 @@ class EnhancedLLMSkillSelector:
 
             for skill in layer_skills:
                 lines.append(f"- **{skill.name}**: {skill.description}")
+
+        # Always include package skills (not in skills/ directory)
+        lines.append("\n### Package Skills\n")
+        lines.append("- **package@assessment**: 综合健康评估，包含人群分组、目标推荐、四高一重(高血压/高血糖/高血脂/高尿酸/肥胖)风险评估、风险提醒和干预处方。当用户要求做健康评估、体检评估、综合评估时使用此skill。")
 
         return "\n".join(lines)
 
@@ -643,6 +654,23 @@ Analyze this request and select appropriate skills. Respond with JSON in the spe
     ) -> MultiSkillSelection:
         """Fallback keyword-based multi-skill selection."""
         user_lower = user_input.lower()
+
+        # Priority check: comprehensive health assessment keywords → package@assessment
+        assessment_keywords = ["健康评估", "综合评估", "体检评估", "全面评估", "健康检查", "做评估", "做健康评估", "健康体检"]
+        for kw in assessment_keywords:
+            if kw in user_lower:
+                logger.info(f"Fallback: detected assessment keyword '{kw}', selecting package@assessment")
+                return MultiSkillSelection(
+                    primary=SkillSelection(
+                        skill_name="package@assessment",
+                        confidence=0.9,
+                        reasoning=f"Keyword match: '{kw}' → comprehensive health assessment",
+                        should_use_skill=True,
+                        selection_type="primary",
+                    ),
+                    user_intent_summary=f"User requested comprehensive health assessment (keyword: {kw})",
+                    execution_suggestion="sequential",
+                )
 
         # Extract skill names and descriptions
         import re

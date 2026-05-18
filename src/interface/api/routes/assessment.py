@@ -315,6 +315,10 @@ async def run_assessment(request: AssessmentRequest):
         # Save orchestration state to session for next request
         health_data["_orchestration_phase"] = so.get("_orchestration_phase", 2)
         health_data["_population_result"] = so.get("population_classification", {})
+        # Save recommended goals so questionnaire API can filter options
+        current_q = so.get("current_question", {})
+        if isinstance(current_q, dict):
+            health_data["_recommended_goals"] = current_q.get("options", [])
         _save_session_data(session_id, health_data or {})
 
         return JSONResponse(content={
@@ -368,15 +372,6 @@ async def run_assessment(request: AssessmentRequest):
 
     # 5.5 Transform abnormal_indicators into indicators + warnings structure
     transform_abnormal_indicators(structured_result)
-
-    # 5.6 LLM 生成个性化处方
-    try:
-        from src.domain.shared.services.prescription_generator import generate_prescriptions
-        structured_result["intervention_prescriptions"] = await generate_prescriptions(
-            structured_result, health_data or {}
-        )
-    except Exception as e:
-        logger.warning(f"Prescription generation failed, keeping script defaults: {e}")
 
     # 6. Build response
     response_data = {
@@ -685,6 +680,17 @@ def _fallback_from_modules(modules: Dict[str, Any]) -> Dict[str, Any]:
         "intervention_prescriptions": [],
         "risk_warnings": [],
     }
+
+    # population-classification skill: modules.population_group
+    population_group = modules.get("population_group", {})
+    if isinstance(population_group, dict) and population_group.get("primary_group"):
+        pg = population_group
+        result["population_classification"] = {
+            "primary_category": pg.get("primary_group", "健康"),
+            "score": pg.get("score", 0),
+            "grouping_basis": pg.get("basis", []),
+        }
+        return result
 
     risk_assessment = modules.get("risk_assessment", {})
     if isinstance(risk_assessment, dict):

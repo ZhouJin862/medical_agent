@@ -686,143 +686,16 @@ class CVDAssessmentExecutor:
                 "risk_model": "China-PAR",
             })
 
-        # Intervention prescriptions (personalized based on abnormal indicators)
-        prescriptions = []
-
-        # Diet
-        diet_items = ["低盐低脂饮食，增加蔬菜水果摄入", "限制钠盐<6g/天"]
-        if patient.tc and patient.tc >= 5.2:
-            diet_items.append(f"总胆固醇{patient.tc}偏高，减少动物内脏、蛋黄等高胆固醇食物")
-        if patient.ldl_c and patient.ldl_c >= 3.4:
-            diet_items.append(f"LDL-C {patient.ldl_c}偏高，限制饱和脂肪摄入，选择植物油")
-        if patient.tg and patient.tg >= 1.7:
-            diet_items.append(f"甘油三酯{patient.tg}偏高，减少精制碳水和酒精摄入")
-        if patient.bmi and patient.bmi >= 24:
-            label = "肥胖" if patient.bmi >= 28 else "超重"
-            diet_items.append(f"BMI {patient.bmi}（{label}），控制每日总热量摄入")
-        prescriptions.append({"type": "diet", "title": "饮食处方", "content": diet_items, "priority": "high"})
-
-        # Exercise
-        exercise_items = ["每周150分钟中等强度有氧运动（快走、游泳等）", "避免久坐，每次运动不少于30分钟"]
-        if patient.sbp and patient.sbp >= 160:
-            exercise_items.append("血压较高，避免剧烈运动和憋气动作，建议先从散步开始")
-        prescriptions.append({"type": "exercise", "title": "运动处方", "content": exercise_items, "priority": "high"})
-
-        # Sleep
-        prescriptions.append({"type": "sleep", "title": "睡眠处方",
-             "content": ["保持每日7-8小时规律睡眠", "避免熬夜"],
-             "priority": "medium"})
-
-        # Monitoring
-        monitor_items = []
-        if patient.sbp and patient.sbp >= 130:
-            monitor_items.append("每日早晚各测一次血压并记录")
-        if patient.tc and patient.tc >= 5.2:
-            monitor_items.append("每3-6个月复查血脂四项")
-        if patient.bmi and patient.bmi >= 24:
-            monitor_items.append("每周测量体重，记录变化趋势")
-        if monitor_items:
-            prescriptions.append({"type": "monitoring", "title": "监测处方", "content": monitor_items, "priority": "medium"})
-
-        # Medication (only for high risk)
-        if primary in ("慢病", "重症") and patient.sbp and patient.sbp >= 140:
-            prescriptions.append({"type": "medication", "title": "用药建议",
-                 "content": [f"血压{patient.sbp}/{patient.dbp}mmHg未达标，建议在医生指导下规范降压治疗", "定期复查，根据医嘱调整用药方案"],
-                 "priority": "high"})
-
-        # Risk warnings
-        risk_warnings = []
-
-        # Build prediction data
-        key_factors = []
-        if patient.sbp and patient.sbp >= 140:
-            key_factors.append(f"{disease_staging or '高血压'}")
-        if patient.tc and patient.tc >= 5.2:
-            key_factors.append("高胆固醇血症")
-        if patient.ldl_c and patient.ldl_c >= 3.4:
-            key_factors.append("LDL-C偏高")
-        if patient.has_diabetes:
-            key_factors.append("糖尿病")
-        if patient.smoker:
-            key_factors.append("吸烟")
-        if patient.bmi and patient.bmi >= 28:
-            key_factors.append("肥胖")
-        elif patient.bmi and patient.bmi >= 24:
-            key_factors.append("超重")
-
-        follow_up_map = {
-            "慢病": "每1-3个月", "重症": "每1-2周",
-            "亚健康": "每3-6个月", "健康": "每年",
-        }
-        follow_up = follow_up_map.get(primary, "每3-6个月")
-
-        if result.ten_year_risk:
-            cat = self._get_category_zh_by_value(result.ten_year_risk)
-            ten_year_pred = {
-                "risk_type": "cardiovascular",
-                "timeframe": "10年",
-                "risk_level": cat,
-                "key_factors": key_factors if key_factors else ["心血管风险因素"],
-                "follow_up": follow_up,
-            }
-            if result.ten_year_risk_range:
-                ten_year_pred["probability"] = result.ten_year_risk_range
-            if result.lifetime_risk:
-                lifetime_label = "高危" if result.lifetime_risk == "high" else "低危"
-                ten_year_pred["lifetime_risk"] = lifetime_label
-            if getattr(result, 'assessment_path', ''):
-                ten_year_pred["model"] = "China-PAR"
-
-            if "高" in cat or "很高" in cat:
-                risk_warnings.append({
-                    "title": "心血管事件风险偏高",
-                    "description": f"10年心血管病风险为{result.ten_year_risk_range or '偏高'}，属于{cat}，建议积极控制血压血脂，{follow_up}复查",
-                    "level": "high",
-                    "prediction": ten_year_pred,
-                })
-            elif "中" in cat:
-                risk_warnings.append({
-                    "title": "心血管风险需关注",
-                    "description": f"10年心血管病风险为{result.ten_year_risk_range or '中等'}，属于{cat}，建议加强血压和血脂管理，{follow_up}复查",
-                    "level": "medium",
-                    "prediction": ten_year_pred,
-                })
-        if patient.sbp and patient.sbp >= 160:
-            bp_pred = {
-                "risk_type": "cardiovascular",
-                "timeframe": "10年",
-                "risk_level": cat if result.ten_year_risk else "高危",
-                "key_factors": key_factors if key_factors else [f"{disease_staging}"],
-                "follow_up": follow_up,
-            }
-            risk_warnings.append({
-                "title": "血压严重偏高",
-                "description": f"收缩压{patient.sbp}mmHg，已达{disease_staging}，需尽快就医调整方案，{follow_up}复查",
-                "level": "high",
-                "prediction": bp_pred,
-            })
-        elif patient.sbp and patient.sbp >= 140:
-            bp_pred = {
-                "risk_type": "cardiovascular",
-                "timeframe": "10年",
-                "risk_level": cat if result.ten_year_risk else "中危",
-                "key_factors": key_factors if key_factors else [f"{disease_staging}"],
-                "follow_up": follow_up,
-            }
-            risk_warnings.append({
-                "title": "血压未达标",
-                "description": f"收缩压{patient.sbp}mmHg，建议调整生活方式或用药，{follow_up}复查",
-                "level": "medium",
-                "prediction": bp_pred,
-            })
-
+        # risk_warnings and intervention_prescriptions are generated by
+        # dedicated LLM skills (risk-warning / prescription-recommendation) in Phase 3.5,
+        # so scripts only output empty placeholders here.
         return {
             "population_classification": population,
             "recommended_data_collection": recommended,
             "abnormal_indicators": abnormal,
             "disease_prediction": disease_prediction,
-            "intervention_prescriptions": prescriptions,
-            "risk_warnings": risk_warnings,
+            "intervention_prescriptions": [],
+            "risk_warnings": [],
         }
 
     def _generate_health_insight(self, result: RiskAssessmentResult, patient: PatientData) -> str:

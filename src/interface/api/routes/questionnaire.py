@@ -62,6 +62,48 @@ def _load_session_answers(session_id: str, party_id: str) -> Dict[str, Any]:
     return answers
 
 
+def _load_recommended_goals(session_id: str) -> list:
+    """Load recommended goals from session data (set by Phase 2 of package assessment)."""
+    path = os.path.join(_SESSIONS_DIR, f"{session_id}.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+    # Only filter if Phase 2 completed (orchestration_phase >= 2)
+    if data.get("_orchestration_phase", 0) < 2:
+        return []
+    return data.get("_recommended_goals", [])
+
+
+def _filter_goal_options(questions: list, recommended_goals: list) -> list:
+    """Filter sport_target1 options to only show recommended goals."""
+    if not recommended_goals:
+        return questions
+    # Extract recommended goal values
+    recommended_values = set()
+    for g in recommended_goals:
+        if isinstance(g, dict) and g.get("value"):
+            recommended_values.add(g["value"])
+    if not recommended_values:
+        return questions
+
+    filtered = []
+    for q in questions:
+        if q.get("id") == "sport_target1" and q.get("options"):
+            q_copy = dict(q)
+            q_copy["options"] = [
+                opt for opt in q["options"]
+                if isinstance(opt, dict) and opt.get("value") in recommended_values
+            ]
+            filtered.append(q_copy)
+        else:
+            filtered.append(q)
+    return filtered
+
+
 def _inject_answers(questions: list, answers: Dict[str, Any]) -> list:
     """Add 'answer' field to each question that has a known answer."""
     if not answers:
@@ -101,6 +143,11 @@ async def get_questionnaire(
         answers = _load_session_answers(session_id, party_id)
 
     questions = _inject_answers(questions, answers)
+
+    # Filter sport_target1 options based on recommended goals from session
+    if session_id:
+        recommended_goals = _load_recommended_goals(session_id)
+        questions = _filter_goal_options(questions, recommended_goals)
 
     return JSONResponse(content={
         "code": 200,
@@ -144,6 +191,14 @@ async def get_question(
                 answers = _load_session_answers(session_id, party_id)
                 if question_id in answers:
                     result["answer"] = answers[question_id]
+
+            # Filter sport_target1 options based on recommended goals from session
+            if session_id and question_id == "sport_target1":
+                recommended_goals = _load_recommended_goals(session_id)
+                if recommended_goals:
+                    recommended_values = {g["value"] for g in recommended_goals if isinstance(g, dict) and g.get("value")}
+                    if recommended_values and result.get("options"):
+                        result["options"] = [opt for opt in result["options"] if isinstance(opt, dict) and opt.get("value") in recommended_values]
 
             return JSONResponse(content={
                 "code": 200,

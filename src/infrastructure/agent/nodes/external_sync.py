@@ -16,6 +16,26 @@ from src.config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
+def _is_profiled(state: AgentState) -> bool:
+    """Check if patient has been profiled (建档) by looking for gender.
+
+    If gender is empty/missing in patient data, the patient has not been
+    profiled in the third-party system, so we should not push data.
+    """
+    # Check patient_context.basic_info.gender (normalized by load_patient_node)
+    ctx = state.patient_context
+    if ctx and ctx.basic_info:
+        gender = ctx.basic_info.get("gender")
+        if gender and str(gender).strip():
+            return True
+    # Fallback: check raw ping_an_health_data.gender
+    if state.ping_an_health_data:
+        gender = state.ping_an_health_data.get("gender")
+        if gender and str(gender).strip():
+            return True
+    return False
+
+
 def _gender_en_to_zh(gender: Optional[str]) -> str:
     """Convert internal English gender to Chinese for the third-party API."""
     if not gender:
@@ -129,6 +149,10 @@ async def sync_patient_data_node(state: AgentState) -> AgentState:
         logger.info("No party_id, skipping sync_patient_data")
         return state
 
+    if not _is_profiled(state):
+        logger.info(f"Patient not profiled (no gender), skipping sync_patient_data for party_id={state.party_id}")
+        return state
+
     state.current_step = "sync_patient_data"
     payload = _build_add_human_info_payload(state)
     if not payload:
@@ -201,6 +225,10 @@ async def push_insight_node(state: AgentState) -> AgentState:
 
     if not state.party_id and not state.patient_id:
         logger.info("No party_id/patient_id, skipping push_insight")
+        return state
+
+    if not _is_profiled(state):
+        logger.info(f"Patient not profiled (no gender), skipping push_insight for party_id={state.party_id or state.patient_id}")
         return state
 
     state.current_step = "push_insight"

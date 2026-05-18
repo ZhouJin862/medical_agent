@@ -4,6 +4,7 @@ Skills Integration - Integrates SkillsRegistry with the agent workflow.
 Provides updated nodes and utilities for LLM-based skill selection
 and Claude Skills execution (including composite skills).
 """
+import asyncio
 import json
 import logging
 import time
@@ -38,6 +39,27 @@ from src.infrastructure.agent.nodes.external_sync import sync_patient_data_node,
 from src.infrastructure.database import get_db_session
 
 logger = logging.getLogger(__name__)
+
+# Module-level phase callback registry for incremental SSE push.
+# Set by streaming_chat.py before calling agent.process(), consumed by
+# _execute_package_assessment. This avoids passing non-serializable
+# async callbacks through LangGraph's AgentState.
+_phase_callback_registry: Dict[str, Any] = {}
+
+
+def set_phase_callback(session_id: str, callback):
+    """Register a phase callback for a session."""
+    _phase_callback_registry[session_id] = callback
+
+
+def get_phase_callback(session_id: str):
+    """Get the phase callback for a session, or None."""
+    return _phase_callback_registry.get(session_id)
+
+
+def clear_phase_callback(session_id: str):
+    """Remove the phase callback for a session."""
+    _phase_callback_registry.pop(session_id, None)
 
 
 async def classify_intent_with_llm_node(state: AgentState) -> AgentState:
@@ -228,7 +250,10 @@ async def execute_claude_skill_node(state: AgentState) -> AgentState:
 
             # Path -1: Package assessment orchestration (highest priority)
             if state.suggested_skill == "package@assessment":
-                skill_executed = await _execute_package_assessment(session, state)
+                # Get phase callback from registry (set by streaming_chat.py)
+                session_id = state.session_id if hasattr(state, 'session_id') and state.session_id else None
+                cb = get_phase_callback(session_id) if session_id else None
+                skill_executed = await _execute_package_assessment(session, state, phase_callback=cb)
 
             # Path 0: Multi-skill execution (highest priority - P1 integration)
             elif has_multi_skill_plan:
@@ -302,12 +327,242 @@ _INSIGHT_SKILLS = [
 ]
 
 
-async def _execute_package_assessment(session, state: AgentState) -> bool:
+def _build_phase_markdown(phase_name: str, data: Dict[str, Any]) -> str:
+    """Build markdown for a single phase section from structured_result data.
+
+    Used for incremental SSE push — each phase gets formatted independently
+    with a fixed template matching the structured_result structure.
+
+    Args:
+        phase_name: One of population_classification, abnormal_indicators,
+                    risk_warnings, intervention_prescriptions
+        data: Dict containing the phase data (e.g. {"population_classification": {...}})
+    """
+    lines = []
+
+    if phase_name == "population_classification":
+        pc = data.get("population_classification", {})
+        if isinstance(pc, str):
+            try:
+                pc = json.loads(pc)
+            except (json.JSONDecodeError, TypeError):
+                pc = {}
+        if not isinstance(pc, dict):
+            pc = {}
+        category = pc.get("primary_category", "")
+        if category:
+            lines.append(f"## 健康人群分组：**{category}**")
+            basis_list = pc.get("grouping_basis", [])
+            if basis_list:
+                lines.append("")
+                lines.append("**分组依据：**")
+                for b in basis_list:
+                    if isinstance(b, dict):
+                        disease = b.get("disease", "")
+                        note = b.get("note", "")
+                        disease_type = b.get("type", "")
+                        level = b.get("level", "")
+                        if note:
+                            detail = f"- {disease}：{note}"
+                        elif disease_type and level:
+                            detail = f"- {disease}：{disease_type}{level}"
+                        elif level:
+                            detail = f"- {disease}：{level}"
+                        else:
+                            detail = f"- {disease}"
+                        lines.append(detail)
+            lines.append("")
+
+    elif phase_name == "recommended_data_collection":
+        items = data.get("recommended_data_collection", [])
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except (json.JSONDecodeError, TypeError):
+                items = []
+        if isinstance(items, list) and items:
+            # Group by new priority tiers
+            critical = [r for r in items if isinstance(r, dict) and r.get("priority") == "critical"]
+            important = [r for r in items if isinstance(r, dict) and r.get("priority") == "important"]
+            optional = [r for r in items if isinstance(r, dict) and r.get("priority") == "optional"]
+            # Legacy: items with "required" priority
+            required = [r for r in items if isinstance(r, dict) and r.get("priority") == "required"]
+            # Items without recognized new priority → treat as important
+            other = [r for r in items if isinstance(r, dict) and r.get("priority") not in ("critical", "important", "optional", "required")]
+
+            if required:
+                lines.append("## 缺少必填数据")
+                lines.append("")
+                for r in required:
+                    item = r.get("item", "")
+                    reason = r.get("reason", "")
+                    line = f"- **{item}**"
+                    if reason:
+                        line += f"：{reason}"
+                    lines.append(line)
+                lines.append("")
+            if critical:
+                lines.append("## 建议尽快补充")
+                lines.append("")
+                for r in critical:
+                    item = r.get("item", "")
+                    reason = r.get("reason", "")
+                    line = f"- **{item}**"
+                    if reason:
+                        line += f"：{reason}"
+                    lines.append(line)
+                lines.append("")
+            if important or other:
+                lines.append("## 建议近期补充")
+                lines.append("")
+                for r in (important + other):
+                    item = r.get("item", "")
+                    reason = r.get("reason", "")
+                    line = f"- {item}"
+                    if reason:
+                        line += f"：{reason}"
+                    lines.append(line)
+                lines.append("")
+            if optional:
+                lines.append("## 后续随访可补充")
+                lines.append("")
+                for r in optional:
+                    item = r.get("item", "")
+                    reason = r.get("reason", "")
+                    line = f"- {item}"
+                    if reason:
+                        line += f"：{reason}"
+                    lines.append(line)
+                lines.append("")
+
+    elif phase_name == "abnormal_indicators":
+        indicators = data.get("abnormal_indicators", [])
+        if isinstance(indicators, str):
+            try:
+                indicators = json.loads(indicators)
+            except (json.JSONDecodeError, TypeError):
+                indicators = []
+        if isinstance(indicators, dict):
+            indicators = indicators.get("indicators", [])
+        if isinstance(indicators, list) and indicators:
+            lines.append("## 异常指标")
+            lines.append("")
+            for a in indicators:
+                if not isinstance(a, dict):
+                    continue
+                name = a.get("name", "")
+                value = a.get("value", "")
+                unit = a.get("unit", "")
+                ref = a.get("reference_range", a.get("reference", ""))
+                severity = a.get("severity", "")
+                line = f"- **{name}**：{value} {unit}"
+                if ref:
+                    line += f"（参考范围：{ref}）"
+                if severity:
+                    line += f" — {severity}"
+                lines.append(line)
+            lines.append("")
+
+    elif phase_name == "risk_warnings":
+        warnings = data.get("risk_warnings", [])
+        if isinstance(warnings, str):
+            try:
+                warnings = json.loads(warnings)
+            except (json.JSONDecodeError, TypeError):
+                warnings = []
+        if isinstance(warnings, list) and warnings:
+            lines.append("## 风险提示")
+            lines.append("")
+            for w in warnings:
+                if not isinstance(w, dict):
+                    continue
+                title = w.get("title", "")
+                desc = w.get("description", "")
+                level = w.get("level", "")
+                icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(level, "⚠️")
+                line = f"- {icon} **{title}**"
+                if desc:
+                    line += f"：{desc}"
+                lines.append(line)
+                # Render prediction if present
+                pred = w.get("prediction")
+                if pred and isinstance(pred, dict):
+                    pred_parts = []
+                    risk_type = pred.get("risk_type", "")
+                    timeframe = pred.get("timeframe", "")
+                    risk_level = pred.get("risk_level", "")
+                    factors = pred.get("key_factors", [])
+                    follow_up = pred.get("follow_up", "")
+                    if risk_level:
+                        pred_parts.append(f"风险等级：{risk_level}")
+                    if timeframe:
+                        pred_parts.append(f"预测时段：{timeframe}")
+                    if factors:
+                        pred_parts.append(f"关键因素：{'、'.join(factors)}")
+                    if follow_up:
+                        pred_parts.append(f"随访建议：{follow_up}")
+                    if pred_parts:
+                        lines.append(f"  - 预测信息：{'；'.join(pred_parts)}")
+            lines.append("")
+
+    elif phase_name == "intervention_prescriptions":
+        prescriptions = data.get("intervention_prescriptions", [])
+        if isinstance(prescriptions, str):
+            try:
+                prescriptions = json.loads(prescriptions)
+            except (json.JSONDecodeError, TypeError):
+                prescriptions = []
+        if isinstance(prescriptions, list) and prescriptions:
+            lines.append("## 干预建议")
+            lines.append("")
+            type_order = ["diet", "exercise", "sleep", "monitoring", "medication"]
+            type_labels = {
+                "diet": "饮食处方",
+                "exercise": "运动处方",
+                "sleep": "睡眠处方",
+                "monitoring": "监测建议",
+                "medication": "药物建议",
+            }
+            by_type: Dict[str, list] = {}
+            for p in prescriptions:
+                if not isinstance(p, dict):
+                    continue
+                t = p.get("type", "other")
+                by_type.setdefault(t, []).append(p)
+
+            for t in type_order:
+                items = by_type.get(t, [])
+                if not items:
+                    continue
+                label = type_labels.get(t, t)
+                lines.append(f"### {label}")
+                for item in items:
+                    contents = item.get("content", [])
+                    if isinstance(contents, list):
+                        for c in contents:
+                            lines.append(f"- {c}")
+                    elif isinstance(contents, str):
+                        lines.append(f"- {contents}")
+                lines.append("")
+
+    return "\n".join(lines) if lines else ""
+
+
+async def _execute_package_assessment(
+    session, state: AgentState,
+    phase_callback=None,
+) -> bool:
     """Orchestrate package@assessment: population-classification → goal-recommendation → insight skills.
 
     Phase 1: population-classification
     Phase 2: goal-recommendation → returns goal_selection
     Phase 3: parallel insight skills (after user selects goal)
+
+    Args:
+        session: Database session
+        state: Agent state
+        phase_callback: Optional async callback(phase_name, phase_label, content, structured_data)
+                         called after each phase/skill completes for incremental SSE push.
     """
     import asyncio
     from src.domain.questionnaire.services.questionnaire_service import QuestionnaireService
@@ -317,11 +572,57 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
     # Determine orchestration phase from session data
     phase = health_data.get("_orchestration_phase", 0)
     logger.info(f"Package assessment: phase={phase}, health_data_keys={list(health_data.keys())[:10]}")
+
+    # Also check patient_context for sport_target (set by load_patient_node
+    # when LLM extracts it from user's plain text message)
+    if phase < 3 and state.patient_context:
+        basic_info = getattr(state.patient_context, 'basic_info', None)
+        if isinstance(basic_info, dict) and basic_info.get("sport_target"):
+            phase = 3
+            logger.info(f"Phase boosted to 3 because patient_context.basic_info has sport_target: {basic_info['sport_target']}")
+
     # Also handles phase=2 when sport_target was submitted (assessment.py bumps to 3)
     if phase >= 3 or (phase == 2 and health_data.get("sport_target")):
         logger.info("Package assessment Phase 3: executing insight skills")
         population_result = health_data.get("_population_result", {})
         selected_goal = health_data.get("sport_target", "")
+        # Also check patient_context for sport_target
+        if not selected_goal and state.patient_context:
+            basic_info = getattr(state.patient_context, 'basic_info', None)
+            if isinstance(basic_info, dict) and basic_info.get("sport_target"):
+                selected_goal = basic_info["sport_target"]
+
+        # If population_result is missing (e.g. streaming chat path),
+        # run Phase 1 first to get population_classification
+        if not population_result or not population_result.get("population_classification"):
+            logger.info("Phase 3: population_result missing, running Phase 1 first")
+            pop_result = await _execute_single_skill_for_orchestration(
+                session, state, "population-classification"
+            )
+            if pop_result:
+                pop_structured = _extract_modules(pop_result)
+                if pop_structured:
+                    modules = pop_structured.get("modules", {})
+                    pc = modules.get("population_classification", modules.get("population_group", {}))
+                    sr = pop_structured.get("structured_result") or (isinstance(pop_result, dict) and pop_result.get("structured_result"))
+                    if isinstance(sr, dict) and sr.get("population_classification"):
+                        pc = sr["population_classification"]
+                    if pc:
+                        population_result = {"population_classification": pc}
+                        logger.info(f"Phase 1 re-run: got population_classification primary_category={pc.get('primary_category')}")
+                        # Push population_classification via callback
+                        if phase_callback:
+                            try:
+                                await phase_callback(
+                                    "population_classification",
+                                    "人群分类",
+                                    _build_phase_markdown("population_classification", {"population_classification": pc}),
+                                    {"population_classification": pc},
+                                )
+                            except Exception as e:
+                                logger.warning(f"Phase 1 re-run callback failed: {e}")
+                    else:
+                        logger.warning("Phase 1 re-run: population_classification still empty")
 
         async def _run_insight(skill_name: str) -> tuple:
             try:
@@ -343,13 +644,18 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
                 logger.warning(f"Insight skill {skill_name} failed: {e}")
                 return skill_name, None, e
 
-        tasks = [_run_insight(s) for s in _INSIGHT_SKILLS]
-        results = await asyncio.gather(*tasks)
-
-        # Build merged structured_output (modules + structured_result)
+        # Run insight skills with incremental callback push
+        # Use as_completed to push each skill result as it finishes
         all_modules = {}
-        all_structured_results = []  # Collect structured_result from each skill
-        for skill_name, result, error in results:
+        all_structured_results = []
+        tasks_map = {}
+        for skill_name in _INSIGHT_SKILLS:
+            coro = _run_insight(skill_name)
+            task = asyncio.ensure_future(coro)
+            tasks_map[task] = skill_name
+
+        for coro in asyncio.as_completed(tasks_map.keys()):
+            skill_name, result, error = await coro
             if error or not result:
                 continue
             # Extract structured_output from result
@@ -376,9 +682,163 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
                     all_structured_results.append(sr_from_result)
                     logger.debug(f"Phase 3 skill {skill_name}: extracted structured_result from top-level")
 
+            # (Phase callback for abnormal_indicators is deferred until all
+            #  insight skills complete, to avoid pushing duplicate content.)
+
         # Merge all structured_results into one combined result
         population_classification = population_result.get("population_classification", {})
         merged_sr = _merge_all_structured_results(all_structured_results, population_classification)
+
+        # Push abnormal_indicators once after all insight skills complete
+        if phase_callback:
+            try:
+                final_indicators = _deduplicate_indicators(
+                    _normalise_indicators(merged_sr.get("abnormal_indicators", []))
+                )
+                if final_indicators:
+                    await phase_callback(
+                        "abnormal_indicators",
+                        "异常指标",
+                        _build_phase_markdown("abnormal_indicators", {"abnormal_indicators": final_indicators}),
+                        {"abnormal_indicators": final_indicators},
+                    )
+            except Exception as e:
+                logger.warning(f"Phase 3 abnormal_indicators callback failed: {e}")
+
+        # Phase 3.5 + 3.6: Execute all 3 pure-LLM skills in parallel
+        # (risk-warning, prescription-recommendation, data-recommendation)
+        # All three take the same inputs (structured_result + health_data) with no
+        # inter-dependencies, so they can run concurrently via asyncio.gather.
+
+        # Build shared inputs once
+        llm_input = json.dumps({
+            "structured_result": merged_sr,
+            "health_data": health_data,
+        }, ensure_ascii=False)
+        patient_context = None
+        if state.patient_context:
+            patient_context = {
+                "basic_info": state.patient_context.basic_info,
+                "vital_signs": state.patient_context.vital_signs,
+                "medical_history": state.patient_context.medical_history,
+            }
+
+        # Build health_data_for_llm for data-recommendation (needs patient_context fields)
+        _pc = {}
+        if state.patient_context:
+            _bi = state.patient_context.basic_info
+            if isinstance(_bi, str):
+                try: _bi = json.loads(_bi)
+                except (json.JSONDecodeError, TypeError): _bi = {}
+            elif not isinstance(_bi, dict): _bi = {}
+            _vs = state.patient_context.vital_signs
+            if isinstance(_vs, str):
+                try: _vs = json.loads(_vs)
+                except (json.JSONDecodeError, TypeError): _vs = {}
+            elif not isinstance(_vs, dict): _vs = {}
+            _mh = state.patient_context.medical_history
+            if isinstance(_mh, str):
+                try: _mh = json.loads(_mh)
+                except (json.JSONDecodeError, TypeError): _mh = {}
+            elif not isinstance(_mh, dict): _mh = {}
+            _pc = {"basic_info": _bi, "vital_signs": _vs, "medical_history": _mh}
+        _basic_info = _pc.get("basic_info", {})
+        if not isinstance(_basic_info, dict):
+            _basic_info = {}
+        health_data_for_llm = {
+            "age": _basic_info.get("age"),
+            "gender": _basic_info.get("gender"),
+            "sport_target": _basic_info.get("sport_target"),
+            "disease_labels": _basic_info.get("disease_labels", []),
+        }
+        dl = health_data_for_llm.get("disease_labels", [])
+        if isinstance(dl, str):
+            health_data_for_llm["disease_labels"] = [dl]
+
+        async def _run_llm_skill(skill_name: str) -> Dict[str, Any]:
+            """Run a single LLM skill and return its result."""
+            try:
+                executor = ClaudeSkillsExecutor(session)
+                return await executor.execute_skill(
+                    skill_name=skill_name,
+                    user_input=llm_input,
+                    patient_context=patient_context,
+                )
+            except Exception as e:
+                logger.warning(f"Phase 3.5 LLM skill {skill_name} failed: {e}")
+                return {"success": False, "error": str(e), "skill_name": skill_name}
+
+        async def _run_data_recommendation() -> list:
+            """Run data-recommendation skill and return ranked items."""
+            raw_rdc = merged_sr.get("recommended_data_collection", [])
+            if not raw_rdc:
+                return []
+            try:
+                from src.domain.shared.services.llm_risk_prescription_skills import generate_data_recommendations
+                ranked = await generate_data_recommendations(
+                    raw_items=raw_rdc,
+                    structured_result=merged_sr,
+                    health_data=health_data_for_llm,
+                )
+                logger.info(f"Phase 3.6 LLM data-recommendation: {len(raw_rdc)} raw → {len(ranked)} ranked")
+                return ranked
+            except Exception as e:
+                import traceback
+                logger.warning(f"Phase 3.6 LLM data-recommendation failed, using raw items: {e}\n{traceback.format_exc()}")
+                return raw_rdc
+
+        # Launch all 3 LLM calls concurrently
+        rw_result, pr_result, ranked_rdc = await asyncio.gather(
+            _run_llm_skill("risk-warning"),
+            _run_llm_skill("prescription-recommendation"),
+            _run_data_recommendation(),
+        )
+
+        # Process risk-warning result
+        if rw_result.get("success") and rw_result.get("structured_output"):
+            so = rw_result["structured_output"]
+            if "risk_warnings" in so:
+                merged_sr["risk_warnings"] = so["risk_warnings"]
+                if phase_callback:
+                    try:
+                        await phase_callback(
+                            "risk_warnings", "风险预警",
+                            _build_phase_markdown("risk_warnings", {"risk_warnings": so["risk_warnings"]}),
+                            {"risk_warnings": so["risk_warnings"]},
+                        )
+                    except Exception as e:
+                        logger.warning(f"Phase 3.5 risk_warnings callback failed: {e}")
+        logger.info(f"Phase 3.5 LLM skill risk-warning: success={rw_result.get('success')}")
+
+        # Process prescription-recommendation result
+        if pr_result.get("success") and pr_result.get("structured_output"):
+            so = pr_result["structured_output"]
+            if "intervention_prescriptions" in so:
+                merged_sr["intervention_prescriptions"] = so["intervention_prescriptions"]
+                if phase_callback:
+                    try:
+                        await phase_callback(
+                            "intervention_prescriptions", "干预建议",
+                            _build_phase_markdown("intervention_prescriptions", {"intervention_prescriptions": so["intervention_prescriptions"]}),
+                            {"intervention_prescriptions": so["intervention_prescriptions"]},
+                        )
+                    except Exception as e:
+                        logger.warning(f"Phase 3.5 prescriptions callback failed: {e}")
+        logger.info(f"Phase 3.5 LLM skill prescription-recommendation: success={pr_result.get('success')}")
+
+        # Process data-recommendation result
+        if ranked_rdc:
+            merged_sr["recommended_data_collection"] = ranked_rdc
+            if phase_callback:
+                try:
+                    await phase_callback(
+                        "recommended_data_collection", "推荐补充数据",
+                        _build_phase_markdown("recommended_data_collection", {"recommended_data_collection": ranked_rdc}),
+                        {"recommended_data_collection": ranked_rdc},
+                    )
+                    logger.info(f"Phase 3.6 pushed recommended_data_collection: {len(ranked_rdc)} items")
+                except Exception as e:
+                    logger.warning(f"Phase 3.6 recommended_data_collection callback failed: {e}")
 
         state.structured_output = {
             "population_classification": merged_sr.get("population_classification", population_classification),
@@ -386,8 +846,8 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
             "structured_result": merged_sr,
             "sport_target": selected_goal,
         }
-        state.final_response = json.dumps(state.structured_output, ensure_ascii=False)
-        logger.info(f"Package assessment Phase 3 complete: {len(results)} skills, {len(all_modules)} modules, {len(all_structured_results)} structured_results")
+        state.final_response = json.dumps(state.structured_output, ensure_ascii=False, default=str)
+        logger.info(f"Package assessment Phase 3 complete: {len(all_structured_results)} structured_results, {len(all_modules)} modules")
         return True
 
     # ---- Phase 1: population-classification ----
@@ -402,9 +862,34 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
     # Extract population classification result
     pop_structured = _extract_modules(pop_result)
     population_classification = {}
+    recommended_data_collection = []
     if pop_structured:
         modules = pop_structured.get("modules", {})
-        population_classification = modules.get("population_classification", {})
+        # population_classifier uses "population_group" key in modules,
+        # but downstream expects "population_classification"
+        population_classification = modules.get("population_classification", modules.get("population_group", {}))
+        # Also check structured_result (more detailed grouping_basis)
+        sr = pop_structured.get("structured_result") or (isinstance(pop_result, dict) and pop_result.get("structured_result"))
+        if isinstance(sr, dict) and sr.get("population_classification"):
+            population_classification = sr["population_classification"]
+        # Extract recommended_data_collection from structured_result
+        if isinstance(sr, dict) and sr.get("recommended_data_collection"):
+            recommended_data_collection = sr["recommended_data_collection"]
+
+    # Phase 1 callback: push population_classification result
+    if phase_callback and population_classification:
+        try:
+            await phase_callback(
+                "population_classification",
+                "人群分类",
+                _build_phase_markdown("population_classification", {"population_classification": population_classification}),
+                {"population_classification": population_classification},
+            )
+        except Exception as e:
+            logger.warning(f"Phase 1 callback failed: {e}")
+
+    # Phase 1.1: Skip raw recommended_data_collection push
+    # (Phase 3.6 will push LLM-ranked results instead)
 
     # ---- Phase 2: goal-recommendation ----
     logger.info("Package assessment Phase 2: goal-recommendation")
@@ -500,7 +985,7 @@ async def _execute_package_assessment(session, state: AgentState) -> bool:
         "population_classification": population_classification,
         "_orchestration_phase": 2,
     }
-    state.final_response = json.dumps(state.structured_output, ensure_ascii=False)
+    state.final_response = json.dumps(state.structured_output, ensure_ascii=False, default=str)
     logger.info(f"Package assessment Phase 2 complete: {len(recommended_goals)} goals recommended")
     return True
 
@@ -602,7 +1087,12 @@ def _merge_all_structured_results(
     # 3. Deduplicate risk_warnings by title
     merged["risk_warnings"] = _deduplicate_risk_warnings(merged.get("risk_warnings", []))
 
-    # 4. Use population_classification from dedicated skill
+    # 4. Deduplicate recommended_data_collection by item name
+    merged["recommended_data_collection"] = _deduplicate_recommended_data(
+        merged.get("recommended_data_collection", [])
+    )
+
+    # 5. Use population_classification from dedicated skill
     if population_classification:
         merged["population_classification"] = population_classification
 
@@ -673,6 +1163,20 @@ def _deduplicate_risk_warnings(warnings: list) -> list:
             new_rank = level_order.get(w.get("level", ""), 99)
             if new_rank < cur_rank:
                 seen[title] = w
+    return list(seen.values())
+
+
+def _deduplicate_recommended_data(items: list) -> list:
+    """Remove duplicate recommended_data_collection items by item name."""
+    seen: Dict[str, dict] = {}  # item name → first occurrence
+    for r in items:
+        if not isinstance(r, dict):
+            continue
+        name = r.get("item", "")
+        if not name:
+            continue
+        if name not in seen:
+            seen[name] = r
     return list(seen.values())
 
 

@@ -421,6 +421,12 @@ class ClaudeSkillsExecutor:
                 "skill_name": skill_name,
             }
 
+        # Check if this is a pure-LLM skill with a dedicated handler
+        llm_handler = self._get_llm_skill_handler(skill_name)
+        if llm_handler:
+            logger.info(f"Executing pure-LLM skill: {skill_name} via dedicated handler")
+            return await llm_handler(skill_def, user_input, patient_context)
+
         # Check if this is a workflow-based skill (has scripts directory with SKILL.md workflow)
         is_workflow = self._is_workflow_skill(skill_name)
 
@@ -460,6 +466,98 @@ class ClaudeSkillsExecutor:
                 "error": str(e),
                 "skill_name": skill_name,
             }
+
+    def _get_llm_skill_handler(self, skill_name: str):
+        """Return a dedicated async handler for pure-LLM skills, or None."""
+        _HANDLERS = {
+            "risk-warning": self._execute_risk_warning_skill,
+            "prescription-recommendation": self._execute_prescription_skill,
+            "data-recommendation": self._execute_data_recommendation_skill,
+        }
+        return _HANDLERS.get(skill_name)
+
+    async def _execute_risk_warning_skill(self, skill_def, user_input, patient_context):
+        """Execute risk-warning skill via llm_risk_prescription_skills."""
+        try:
+            from src.domain.shared.services.llm_risk_prescription_skills import generate_risk_warnings
+
+            structured_result = {}
+            health_data = {}
+            if isinstance(user_input, str):
+                try:
+                    parsed = json.loads(user_input)
+                    structured_result = parsed.get("structured_result", parsed)
+                    health_data = parsed.get("health_data", {})
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            warnings = await generate_risk_warnings(structured_result, health_data)
+            return {
+                "success": True,
+                "skill_name": "risk-warning",
+                "response": json.dumps({"risk_warnings": warnings}, ensure_ascii=False),
+                "skill_source": "file",
+                "structured_output": {"risk_warnings": warnings},
+            }
+        except Exception as e:
+            logger.error(f"Failed to execute risk-warning skill: {e}")
+            return {"success": False, "error": str(e), "skill_name": "risk-warning"}
+
+    async def _execute_prescription_skill(self, skill_def, user_input, patient_context):
+        """Execute prescription-recommendation skill via llm_risk_prescription_skills."""
+        try:
+            from src.domain.shared.services.llm_risk_prescription_skills import generate_intervention_prescriptions
+
+            structured_result = {}
+            health_data = {}
+            if isinstance(user_input, str):
+                try:
+                    parsed = json.loads(user_input)
+                    structured_result = parsed.get("structured_result", parsed)
+                    health_data = parsed.get("health_data", {})
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            prescriptions = await generate_intervention_prescriptions(structured_result, health_data)
+            return {
+                "success": True,
+                "skill_name": "prescription-recommendation",
+                "response": json.dumps({"intervention_prescriptions": prescriptions}, ensure_ascii=False),
+                "skill_source": "file",
+                "structured_output": {"intervention_prescriptions": prescriptions},
+            }
+        except Exception as e:
+            logger.error(f"Failed to execute prescription-recommendation skill: {e}")
+            return {"success": False, "error": str(e), "skill_name": "prescription-recommendation"}
+
+    async def _execute_data_recommendation_skill(self, skill_def, user_input, patient_context):
+        """Execute data-recommendation skill via llm_risk_prescription_skills."""
+        try:
+            from src.domain.shared.services.llm_risk_prescription_skills import generate_data_recommendations
+
+            raw_items = []
+            structured_result = {}
+            health_data = {}
+            if isinstance(user_input, str):
+                try:
+                    parsed = json.loads(user_input)
+                    raw_items = parsed.get("raw_items", [])
+                    structured_result = parsed.get("structured_result", parsed)
+                    health_data = parsed.get("health_data", {})
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            recommendations = await generate_data_recommendations(raw_items, structured_result, health_data)
+            return {
+                "success": True,
+                "skill_name": "data-recommendation",
+                "response": json.dumps({"recommended_data_collection": recommendations}, ensure_ascii=False),
+                "skill_source": "file",
+                "structured_output": {"recommended_data_collection": recommendations},
+            }
+        except Exception as e:
+            logger.error(f"Failed to execute data-recommendation skill: {e}")
+            return {"success": False, "error": str(e), "skill_name": "data-recommendation"}
 
     def _is_workflow_skill(self, skill_name: str) -> bool:
         """
@@ -567,6 +665,9 @@ class ClaudeSkillsExecutor:
                     # Unwrap nested final_output (skill_md_executor wraps step output)
                     if "final_output" in final_output and isinstance(final_output["final_output"], dict):
                         inner = final_output["final_output"]
+                        # Also check for structured_result inside the nested final_output
+                        if not raw_structured_result and "structured_result" in inner:
+                            raw_structured_result = inner.get("structured_result")
                         if "modules" in inner:
                             final_output = inner
 
