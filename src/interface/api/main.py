@@ -27,6 +27,7 @@ from src.interface.api.routes import prompts
 from src.interface.api.routes import assessment
 from src.interface.api.routes import questionnaire
 from src.interface.api.routes import insight
+from src.interface.api.routes import wiki
 from src.interface.api.dto.response import HealthResponse
 from src.infrastructure.database import init_database, close_database
 
@@ -112,6 +113,7 @@ def create_application() -> FastAPI:
     app.include_router(assessment.router)
     app.include_router(questionnaire.router)
     app.include_router(insight.router)
+    app.include_router(wiki.router)
 
     # Add health check route
     @app.get("/api/health", response_model=HealthResponse, tags=["health"])

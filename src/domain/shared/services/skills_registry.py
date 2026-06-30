@@ -31,13 +31,17 @@ class SkillsRegistry:
     3. As-needed: Load reference files only when referenced
     """
 
-    def __init__(self, skills_dir: str = "skills"):
+    def __init__(self, skills_dir: Optional[str] = None):
         """
         Initialize the skills registry.
 
         Args:
-            skills_dir: Root directory containing skill subdirectories
+            skills_dir: Root directory containing skill subdirectories.
+                        Defaults to settings.SKILLS_DIR.
         """
+        if skills_dir is None:
+            from src.config.settings import settings
+            skills_dir = settings.skills_dir
         self._skills_dir = Path(skills_dir)
         self._metadata_cache: Dict[str, SkillMetadata] = {}
         self._definition_cache: Dict[str, SkillDefinition] = {}

@@ -47,8 +47,8 @@ class EnhancedLLMSkillSelector:
             session: Database session for unified repository
         """
         self._session = session
-        self._repository = UnifiedSkillsRepository(session, skills_dir="skills")
-        self._anthropic_api_key = get_settings().anthropic_api_key
+        self._repository = UnifiedSkillsRepository(session)
+        self._llm_api_key = get_settings().llm_api_key
 
     async def select_skills(
         self,
@@ -222,13 +222,13 @@ class EnhancedLLMSkillSelector:
         Returns:
             Multi-skill selection result
         """
-        if not self._anthropic_api_key:
+        if not self._llm_api_key:
             return self._fallback_select(user_input, skill_descriptions)
 
         try:
-            import anthropic
+            import openai
 
-            client = anthropic.Anthropic(api_key=self._anthropic_api_key)
+            client = openai.OpenAI(api_key=self._llm_api_key, base_url=get_settings().llm_base_url)
 
             # Load system prompt from DB with hardcoded fallback
             from src.domain.shared.services.system_prompt_service import get_system_prompt_service
@@ -318,14 +318,16 @@ Analyze this request and select appropriate skills. Respond with JSON in the spe
 {user_message}
 """
 
-            response = client.messages.create(
+            response = client.chat.completions.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=1000,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_message}],
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
             )
 
-            response_text = response.content[0].text
+            response_text = response.choices[0].message.content
             logger.info(f"LLM multi-skill raw response: {response_text[:2000]}")
             return self._parse_multi_skill_response(response_text)
 

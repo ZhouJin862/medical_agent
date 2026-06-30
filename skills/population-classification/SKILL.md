@@ -5,6 +5,8 @@ tags: [人群分组, 健康分组, 亚健康, 慢病, 重症, population, classi
 tools:
   - script: scripts/population_classifier.py
     args: ["--input", "$input", "--mode", "skill"]
+  - script: scripts/unmatched_indicator_llm.py
+    args: ["--input", "$prev_output", "--mode", "skill"]
 ---
 
 # 健康人群分组评估
@@ -74,6 +76,17 @@ tools:
 - 轻度异常（如BMI 24-27.9）：低分
 - 中度异常（如收缩压 140-159）：中分
 - 重度异常（如收缩压 ≥180 或空腹血糖 ≥11.1）：高分
+
+### 未匹配指标 LLM 分析（Step 2）
+
+Step 1 仅评分 `INDICATOR_SCORING` 中的 12 项指标。Step 2 将 Step 1 中未被评分的指标（`unmatched_indicators`）交给 LLM 进行临床判断：
+
+1. LLM 逐一判断未匹配指标是否异常及其严重程度（critical/high/medium/low/normal）
+2. 异常指标补充到 `abnormal_indicators`
+3. 根据补充异常指标的严重程度，**只升不降**调整人群分组：
+   - ≥1 个 medium-abnormal → 健康→亚健康
+   - ≥1 个 high-abnormal → 亚健康→慢病
+   - ≥1 个 critical-abnormal → 慢病→重症
 
 ## 输出格式
 

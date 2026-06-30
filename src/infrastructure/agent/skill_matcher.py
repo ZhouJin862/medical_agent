@@ -110,21 +110,24 @@ _AVAILABLE_SKILLS: Dict[str, SkillInfo] = {
 }
 
 
-async def discover_skills_from_directory(skills_dir: str = "skills") -> Dict[str, SkillInfo]:
+async def discover_skills_from_directory(skills_dir: Optional[str] = None) -> Dict[str, SkillInfo]:
     """
     Auto-discover skills from the skills directory.
 
     Reads SKILL.md files and extracts name and description from frontmatter.
 
     Args:
-        skills_dir: Path to skills directory
+        skills_dir: Path to skills directory. Defaults to settings.SKILLS_DIR.
 
     Returns:
         Dictionary mapping skill names to SkillInfo
     """
     from pathlib import Path
     import yaml
+    from src.config.settings import settings
 
+    if skills_dir is None:
+        skills_dir = settings.skills_dir
     skills_path = Path(skills_dir)
     if not skills_path.exists():
         logger.warning(f"Skills directory not found: {skills_dir}")
@@ -254,26 +257,28 @@ async def match_skill_with_llm(
 
     try:
         from src.config.settings import get_settings
-        import anthropic
+        import openai
 
         settings = get_settings()
-        if not settings.anthropic_api_key:
+        if not settings.llm_api_key:
             logger.warning("No Anthropic API key, using keyword fallback")
             return _match_with_keywords(user_input, available_skills)
 
-        client = anthropic.Anthropic(
-            api_key=settings.anthropic_api_key,
-            base_url=settings.anthropic_base_url if settings.anthropic_base_url != "https://api.anthropic.com" else None,
+        client = openai.OpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
         )
 
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=settings.model,
             max_tokens=100,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_input}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input},
+            ],
         )
 
-        llm_output = response.content[0].text.strip().lower()
+        llm_output = response.choices[0].message.content.strip().lower()
         logger.info(f"LLM skill match output: {llm_output}")
 
         # Parse LLM response

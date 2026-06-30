@@ -45,7 +45,7 @@ class SkillOrchestrator:
             session: Database session
         """
         self._session = session
-        self._repository = UnifiedSkillsRepository(session, skills_dir="skills")
+        self._repository = UnifiedSkillsRepository(session)
         self._executor = SkillExecutor(self._repository)
 
     async def execute_plan(
@@ -417,8 +417,9 @@ class SkillExecutor:
         Returns None if no script found, so caller can fall through to prompt.
         """
         from pathlib import Path
+        from src.config.settings import settings
 
-        skill_dir = Path("skills") / skill_name
+        skill_dir = Path(settings.skills_dir) / skill_name
         if not skill_dir.exists():
             return None
 
@@ -485,9 +486,10 @@ class SkillExecutor:
         try:
             from pathlib import Path
             import yaml
+            from src.config.settings import settings
 
             possible_paths = [
-                Path("skills") / skill_name,
+                Path(settings.skills_dir) / skill_name,
                 Path.cwd() / "skills" / skill_name,
             ]
 
@@ -549,9 +551,10 @@ class SkillExecutor:
         try:
             from pathlib import Path
             import os
+            from src.config.settings import settings
 
             possible_paths = [
-                Path("skills") / skill_name,
+                Path(settings.skills_dir) / skill_name,
                 Path.cwd() / "skills" / skill_name,
             ]
 
@@ -628,13 +631,13 @@ class SkillExecutor:
         conversation_context: Optional[str],
     ) -> SkillExecutionResult:
         """Execute prompt skill using LLM."""
-        import anthropic
+        import openai
         from src.config.settings import get_settings
 
         settings = get_settings()
-        client = anthropic.Anthropic(
-            api_key=settings.anthropic_api_key,
-            base_url=settings.anthropic_base_url,
+        client = openai.OpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
             timeout=30.0
         )
 
@@ -646,7 +649,7 @@ class SkillExecutor:
             conversation_context,
         )
 
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=settings.model,
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
@@ -655,7 +658,7 @@ class SkillExecutor:
         return SkillExecutionResult(
             skill_name=skill_def.metadata.name,
             success=True,
-            response=response.content[0].text,
+            response=response.choices[0].message.content,
         )
 
     def _build_skill_input_data(
@@ -792,7 +795,7 @@ class ResultAggregator:
         user_input: str,
     ) -> str:
         """Use LLM to intelligently aggregate multiple skill results into a unified report."""
-        import anthropic
+        import openai
         from src.config.settings import get_settings
 
         # Extract all successful skill responses
@@ -841,20 +844,20 @@ class ResultAggregator:
 
         try:
             settings = get_settings()
-            client = anthropic.Anthropic(
-                api_key=settings.anthropic_api_key,
-                base_url=settings.anthropic_base_url if settings.anthropic_base_url != "https://api.anthropic.com" else None,
+            client = openai.OpenAI(
+                api_key=settings.llm_api_key,
+                base_url=settings.llm_base_url,
                 timeout=60.0,
             )
 
             logger.info(f"Starting intelligent aggregation for {len(skill_reports)} skill reports")
-            response = client.messages.create(
+            response = client.chat.completions.create(
                 model=settings.model,
                 max_tokens=4000,
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            aggregated = response.content[0].text
+            aggregated = response.choices[0].message.content
             logger.info(f"Intelligent aggregation completed, response length: {len(aggregated)}")
             return aggregated
 
@@ -998,14 +1001,14 @@ class ResultAggregator:
         user_input: str,
     ) -> str:
         """Generate an LLM-based summary from structured outputs."""
-        import anthropic
+        import openai
         from src.config.settings import get_settings
 
         try:
             settings = get_settings()
-            client = anthropic.Anthropic(
-                api_key=settings.anthropic_api_key,
-                base_url=settings.anthropic_base_url,
+            client = openai.OpenAI(
+                api_key=settings.llm_api_key,
+                base_url=settings.llm_base_url,
                 timeout=30.0  # Add timeout to prevent hanging
             )
 
@@ -1068,15 +1071,15 @@ Keep the response concise and actionable.""",
             except (KeyError, IndexError):
                 prompt = prompt_template
 
-            response = client.messages.create(
+            response = client.chat.completions.create(
                 model=settings.model,
                 max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            return response.content[0].text
+            return response.choices[0].message.content
 
-        except anthropic.APITimeoutError as e:
+        except openai.APITimeoutError as e:
             logger.warning(f"LLM API timeout during structured summary: {e}")
             # Fallback: try to extract and return the first message
             for r in structured_results:
@@ -1084,7 +1087,7 @@ Keep the response concise and actionable.""",
                 if msg:
                     return msg
             return "需要补充健康数据才能进行评估。请提供年龄、血压、血脂等关键指标以完成评估。"
-        except anthropic.APIError as e:
+        except openai.APIError as e:
             logger.warning(f"LLM API error during structured summary: {e}")
             # Fallback: try to extract and return the first message
             for r in structured_results:
@@ -1103,14 +1106,14 @@ Keep the response concise and actionable.""",
 
     async def _generate_fallback_response(self, user_input: str, failed_results: List[SkillExecutionResult]) -> str:
         """Generate an LLM-based fallback response when all skills fail."""
-        import anthropic
+        import openai
         from src.config.settings import get_settings
 
         try:
             settings = get_settings()
-            client = anthropic.Anthropic(
-                api_key=settings.anthropic_api_key,
-                base_url=settings.anthropic_base_url,
+            client = openai.OpenAI(
+                api_key=settings.llm_api_key,
+                base_url=settings.llm_base_url,
                 timeout=30.0
             )
 
@@ -1147,13 +1150,13 @@ Respond in a helpful, professional tone in Chinese (since the user input is in C
             except (KeyError, IndexError):
                 prompt = prompt_template
 
-            response = client.messages.create(
+            response = client.chat.completions.create(
                 model=settings.model,
                 max_tokens=1000,
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            return response.content[0].text
+            return response.choices[0].message.content
 
         except Exception as e:
             logger.error(f"Failed to generate fallback response: {e}")

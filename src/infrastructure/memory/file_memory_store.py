@@ -74,8 +74,16 @@ class FileMemoryStore:
 
         return entry
 
-    def get_all(self, user_id: str) -> List[Dict]:
-        """Get all memories for a user."""
+    def get_all(self, user_id: str, limit: int = None) -> List[Dict]:
+        """Get memories for a user, optionally limited to the most recent N entries.
+
+        Args:
+            user_id: User/patient identifier
+            limit: Maximum number of recent memories to return. None = all.
+
+        Returns:
+            List of memory entries (most recent last)
+        """
         file_path = self._get_user_file(user_id)
 
         if not file_path.exists():
@@ -84,10 +92,31 @@ class FileMemoryStore:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 memories = json.load(f)
+                if limit is not None and len(memories) > limit:
+                    return memories[-limit:]
                 return memories
         except Exception as e:
             logger.error(f"Failed to load memories for {user_id}: {e}")
             return []
+
+    def delete_all(self, user_id: str) -> bool:
+        """Delete all memories for a user.
+
+        Args:
+            user_id: User/patient identifier
+
+        Returns:
+            True if deleted, False if not found
+        """
+        file_path = self._get_user_file(user_id)
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                logger.info(f"Deleted all memories for {user_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to delete memories for {user_id}: {e}")
+        return False
 
     def search(self, query: str, user_id: str = None, limit: int = 5) -> List[Dict]:
         """Search memories by query."""

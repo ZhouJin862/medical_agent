@@ -201,25 +201,28 @@ def _build_prompt(structured_result: Dict[str, Any], patient_data: Dict[str, Any
 
 async def _call_llm(prompt: str) -> str:
     """Call the LLM and return raw text response."""
-    import anthropic
+    import openai
 
     settings = get_settings()
-    if not settings.anthropic_api_key:
+    if not settings.llm_api_key:
         raise RuntimeError("No API key configured for LLM prescription generation")
 
-    client = anthropic.Anthropic(
-        api_key=settings.anthropic_api_key,
-        base_url=settings.anthropic_base_url if settings.anthropic_base_url != "https://api.anthropic.com" else None,
+    client = openai.OpenAI(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
     )
 
-    response = client.messages.create(
+    messages = [
+        {"role": "system", "content": "你是一个专业的健康管理处方生成系统。根据患者的健康数据生成个性化干预建议。严格按照要求的JSON格式输出，不要包含其他文字。"},
+        {"role": "user", "content": prompt},
+    ]
+    response = client.chat.completions.create(
         model=settings.model,
         max_tokens=2000,
-        system="你是一个专业的健康管理处方生成系统。根据患者的健康数据生成个性化干预建议。严格按照要求的JSON格式输出，不要包含其他文字。",
-        messages=[{"role": "user", "content": prompt}],
+        messages=messages,
     )
 
-    return response.content[0].text
+    return response.choices[0].message.content
 
 
 # ---------------------------------------------------------------------------

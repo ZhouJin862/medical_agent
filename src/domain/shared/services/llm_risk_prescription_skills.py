@@ -17,29 +17,48 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Wiki RAG context helper
+# ---------------------------------------------------------------------------
+
+def _get_wiki_context(skill_name: str, health_data: Dict, max_chars: int = 3000) -> str:
+    """Load Wiki knowledge base context for prompt injection."""
+    try:
+        from src.infrastructure.wiki import WikiStore
+        store = WikiStore(get_settings().wiki_dir)
+        disease_labels = health_data.get("disease_labels", [])
+        return store.get_context_for_prompt(skill_name, disease_labels, max_chars)
+    except Exception as e:
+        logger.warning(f"Failed to load wiki context: {e}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Shared LLM call
 # ---------------------------------------------------------------------------
 
 async def _call_llm(system_prompt: str, user_prompt: str) -> str:
     """Call the configured LLM and return raw text."""
-    import anthropic
+    import openai
 
     settings = get_settings()
-    if not settings.anthropic_api_key:
+    if not settings.llm_api_key:
         raise RuntimeError("No API key configured for LLM skill")
 
-    client = anthropic.Anthropic(
-        api_key=settings.anthropic_api_key,
-        base_url=settings.anthropic_base_url if settings.anthropic_base_url != "https://api.anthropic.com" else None,
+    client = openai.OpenAI(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
     )
 
-    response = client.messages.create(
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    response = client.chat.completions.create(
         model=settings.model,
         max_tokens=2000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
+        messages=messages,
     )
-    return response.content[0].text
+    return response.choices[0].message.content
 
 
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
@@ -182,6 +201,18 @@ def _build_risk_warning_prompt(
 - worsening_risk：描述当前风险如果不进行干预，随时间推移可能如何恶化进展。需基于疾病自然史和权威指南，说明恶化路径。
 - complication_risk：描述当前风险可能引发的具体并发症名称和后果。需基于权威文献，列出最可能发生的并发症。
 """
+
+    # Inject Wiki RAG context
+    wiki_ctx = _get_wiki_context("risk-warning", health_data)
+    if wiki_ctx:
+        prompt += f"""
+
+## 参考指南摘要（基于权威医学指南提取）
+
+{wiki_ctx}
+
+请根据以上参考指南摘要，结合患者实际数据，生成循证建议。引用时请注明具体指南名称和章节。"""
+
     return prompt
 
 
@@ -369,6 +400,18 @@ def _build_prescription_prompt(
 
 {template_str}
 """
+
+    # Inject Wiki RAG context
+    wiki_ctx = _get_wiki_context("prescription-recommendation", health_data)
+    if wiki_ctx:
+        prompt += f"""
+
+## 参考指南摘要（基于权威医学指南提取）
+
+{wiki_ctx}
+
+请根据以上参考指南摘要，结合患者实际数据，生成循证建议。引用时请注明具体指南名称和章节。"""
+
     return prompt
 
 

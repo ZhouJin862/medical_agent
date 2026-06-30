@@ -42,7 +42,7 @@ class SkillDefinition:
     name: str
     description: str
     signature_name: str
-    model_provider: str = "anthropic"
+    model_provider: str = "openai"
     model_config: dict = field(default_factory=dict)
     enabled: bool = True
     intent_keywords: list[str] = field(default_factory=list)
@@ -100,7 +100,7 @@ class SkillRegistry:
                     name=skill.skill_name,
                     description=skill.skill_desc or "",
                     signature_name=skill.skill_type or "default",
-                    model_provider=skill.model_provider or "anthropic",
+                    model_provider=skill.model_provider or "openai",
                     model_config=skill.skill_config or {},
                     enabled=skill.is_enabled,
                     intent_keywords=skill.intent_keywords or [],
@@ -133,7 +133,7 @@ class SkillRegistry:
                 name=config["name"],
                 description=config.get("description", ""),
                 signature_name=config.get("signature_name", "default"),
-                model_provider=config.get("model_provider", "anthropic"),
+                model_provider=config.get("model_provider", "openai"),
                 model_config=config.get("model_config", {}),
                 enabled=config.get("enabled", True),
                 intent_keywords=config.get("intent_keywords", []),

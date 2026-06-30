@@ -73,25 +73,28 @@ async def extract_health_data_from_message(user_input: str) -> Dict[str, Any]:
         Each sub-dict only contains fields that were successfully extracted.
     """
     settings = get_settings()
-    if not settings.anthropic_api_key:
+    if not settings.llm_api_key:
         logger.warning("No API key for LLM health data extraction, returning empty dict")
         return {}
 
-    import anthropic
+    import openai
 
-    client = anthropic.Anthropic(
-        api_key=settings.anthropic_api_key,
-        base_url=settings.anthropic_base_url if settings.anthropic_base_url != "https://api.anthropic.com" else None,
+    client = openai.OpenAI(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
     )
 
     try:
-        response = client.messages.create(
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_input},
+        ]
+        response = client.chat.completions.create(
             model=settings.model,
             max_tokens=1000,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_input}],
+            messages=messages,
         )
-        raw_text = response.content[0].text
+        raw_text = response.choices[0].message.content
     except Exception as e:
         logger.warning(f"LLM health data extraction failed: {e}")
         return {}

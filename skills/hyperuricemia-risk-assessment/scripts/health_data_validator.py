@@ -439,6 +439,16 @@ class HealthDataValidator:
         print(f"验证后的数据已保存至: {output_path}", file=sys.stderr)
 
 
+def run(input_data: dict) -> dict:
+    """Standard function interface for skill executor."""
+    validator = HealthDataValidator()
+    adapted = adapt_agent_format(input_data)
+    is_valid, validated_data = validator.validate_data(adapted)
+    if is_valid:
+        return validated_data
+    return {"success": False, "errors": validator.errors}
+
+
 def main():
     # UTF-8 encoding fix for Windows
     import io

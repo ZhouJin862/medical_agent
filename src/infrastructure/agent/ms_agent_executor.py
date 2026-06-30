@@ -18,6 +18,8 @@ MS-Agent ScriptExecutor 集成 - 统一技能执行入口
 import logging
 import time
 from pathlib import Path
+
+from src.config.settings import settings
 from typing import Optional, Dict, Any
 
 from src.infrastructure.agent.state import PatientContext, SkillExecutionResult
@@ -99,7 +101,7 @@ async def execute_skill_via_backend(
     """
     import asyncio
 
-    skill_dir = Path("skills") / skill_name
+    skill_dir = Path(settings.skills_dir) / skill_name
     if not skill_dir.exists():
         logger.warning(f"Skill directory not found: {skill_dir}")
         return None
@@ -299,7 +301,7 @@ def register_skills_as_tools() -> list:
     tool_manager = ToolManager()
     tools = []
 
-    skills_dir = Path("skills")
+    skills_dir = Path(settings.skills_dir)
     if not skills_dir.exists():
         logger.info(f"Skills directory not found: {skills_dir}")
         return []

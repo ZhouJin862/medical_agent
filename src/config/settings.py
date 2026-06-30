@@ -1,7 +1,9 @@
 """Application configuration using Pydantic Settings."""
 
+import os
 from functools import lru_cache
-from typing import Literal
+from pathlib import Path
+from typing import ClassVar, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,11 +19,11 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
-    # Anthropic / LLM Configuration
-    anthropic_api_key: str = Field(default="", description="Anthropic API key for LLM access")
-    anthropic_base_url: str = Field(
-        default="https://api.anthropic.com",
-        description="Anthropic API base URL"
+    # LLM Configuration (OpenAI-compatible API)
+    llm_api_key: str = Field(default="", description="LLM API key for OpenAI-compatible endpoint")
+    llm_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        description="LLM API base URL (OpenAI-compatible)"
     )
     model: str = Field(default="glm-5", description="LLM model identifier (GLM-5)")
 
@@ -99,8 +101,38 @@ class Settings(BaseSettings):
     external_api_enabled: bool = Field(default=True, description="Enable external API push (sync patient data + insight)")
     external_api_use_human_query: bool = Field(default=True, description="Use humanQuery API instead of legacy queryHealthData")
 
+    # Path Configuration (supports NAS mount)
+    _project_root: ClassVar[str] = str(Path(__file__).parent.parent.parent)
+    skills_dir: str = Field(
+        default=_project_root + "/skills",
+        description="Skills directory path (env: SKILLS_DIR)"
+    )
+    data_dir: str = Field(
+        default=_project_root + "/data",
+        description="Data directory path (env: DATA_DIR)"
+    )
+    config_dir: str = Field(
+        default=_project_root + "/config",
+        description="Config directory path (env: CONFIG_DIR)"
+    )
+    wiki_dir: str = Field(
+        default=_project_root + "/data/wiki",
+        description="Wiki knowledge base directory (env: WIKI_DIR)"
+    )
+    wiki_upload_dir: str = Field(
+        default=_project_root + "/data/wiki/_uploads",
+        description="Temporary PDF upload directory (env: WIKI_UPLOAD_DIR)"
+    )
+    wiki_llm_model: str = Field(
+        default="",
+        description="LLM model for Wiki extraction (env: WIKI_LLM_MODEL). Falls back to 'model' if empty."
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
+
+# Module-level singleton for convenient access
+settings = get_settings()

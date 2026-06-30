@@ -310,6 +310,15 @@ class PopulationClassifier:
                 if agent_field in vs and vs[agent_field] is not None:
                     patient_data[internal_field] = vs[agent_field]
 
+            # Pass through unmapped vital_signs fields (for Step 2 unmatched indicator analysis)
+            mapped_keys = set(field_mapping.keys())
+            _META_KEYS = {'_orchestration_phase', 'sport_target', 'sport_target1',
+                          'population_group', 'patient_id', 'party_id', 'session_id'}
+            for key, value in vs.items():
+                if key not in mapped_keys and key not in _META_KEYS:
+                    if value is not None and value != '' and value != []:
+                        patient_data[key] = value
+
         if 'medical_history' in input_data:
             mh = input_data['medical_history']
             # Extract disease labels (English labels like "hypertension")
@@ -678,6 +687,44 @@ class PopulationClassifier:
         elif risk_factor_count >= 1:
             return "中危"
         return "低危"
+
+    def _collect_unmatched_indicators(self, patient_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Collect indicators from patient_data that are not in INDICATOR_SCORING.
+
+        Returns list of {key, value} dicts for all non-scoring fields that have
+        numeric values (excluding meta keys, basic info, disease flags, symptoms).
+        """
+        # Keys to skip — these are basic info, disease flags, or internal meta
+        _SKIP_KEYS = {
+            'age', 'gender', 'height', 'weight', 'bmi',
+            'disease_labels', 'disease_history', 'disease_severity',
+            'symptoms', 'sport_target', 'sport_target1',
+            'has_diabetes', 'has_hypertension', 'has_hyperlipidemia',
+            'has_ckd', 'has_established_cvd', 'smoker',
+            # Ping An / agent meta keys
+            '_orchestration_phase', 'party_id', 'session_id',
+            'user_input', 'patient_data', 'vital_signs', 'medical_history',
+            'ping_an_health_data', 'previous_patient_context',
+        }
+
+        scored_keys = set(INDICATOR_SCORING.keys()) | set(self._FIELD_ALIASES.values())
+        unmatched = []
+        for key, value in patient_data.items():
+            if key in _SKIP_KEYS:
+                continue
+            if key in scored_keys:
+                continue
+            if value is None or value == '' or value == []:
+                continue
+            # Only include numeric values (lab indicators) or known clinical fields
+            try:
+                float(value)
+                unmatched.append({"key": key, "value": float(value)})
+            except (ValueError, TypeError):
+                # Keep non-numeric if it looks like a clinical field (not a string sentence)
+                if isinstance(value, (int, float)):
+                    unmatched.append({"key": key, "value": value})
+        return unmatched
 
     def _build_abnormal_indicators(self, patient_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Build abnormal indicators list for structured_result."""
@@ -1048,6 +1095,9 @@ class PopulationClassifier:
                 "note": "所有指标正常",
             }]
 
+        # Collect unmatched indicators for LLM analysis in Step 2
+        unmatched_indicators = self._collect_unmatched_indicators(patient_data)
+
         structured_result = {
             "population_classification": {
                 "primary_category": primary_group,
@@ -1057,6 +1107,7 @@ class PopulationClassifier:
             "abnormal_indicators": self._build_abnormal_indicators(patient_data),
             "intervention_prescriptions": self._build_intervention_prescriptions(primary_group),
             "risk_warnings": self._build_risk_warnings(primary_group, patient_data, total_score, grouping_basis),
+            "unmatched_indicators": unmatched_indicators,
         }
 
         return {
@@ -1073,6 +1124,12 @@ class PopulationClassifier:
                 "gender": patient_data.get('gender'),
             },
         }
+
+
+def run(input_data: dict) -> dict:
+    """Standard function interface for skill executor."""
+    classifier = PopulationClassifier()
+    return classifier.assess(input_data)
 
 
 def main():

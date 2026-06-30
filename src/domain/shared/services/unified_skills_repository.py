@@ -133,14 +133,17 @@ class UnifiedSkillsRepository:
     - Database Skills (legacy)
     """
 
-    def __init__(self, session: AsyncSession, skills_dir: str = "skills"):
+    def __init__(self, session: AsyncSession, skills_dir: Optional[str] = None):
         """
         Initialize the unified repository.
 
         Args:
             session: Database session
-            skills_dir: Directory for Claude Skills
+            skills_dir: Directory for Claude Skills. Defaults to settings.SKILLS_DIR.
         """
+        if skills_dir is None:
+            from src.config.settings import settings
+            skills_dir = settings.skills_dir
         self._session = session
         self._file_registry = SkillsRegistry(skills_dir)
         self._adapter = DatabaseSkillAdapter()

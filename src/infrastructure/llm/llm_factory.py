@@ -9,7 +9,6 @@ from typing import Optional, Dict, Type
 from enum import Enum
 
 from .llm_interface import LLMInterface, LLMConfig
-from .anthropic_llm import AnthropicLLM
 from .openai_llm import OpenAILLM
 
 logger = logging.getLogger(__name__)
@@ -18,8 +17,7 @@ logger = logging.getLogger(__name__)
 class ModelProvider(Enum):
     """Available model providers."""
 
-    ANTHROPIC = "anthropic"  # Claude models or GLM via Anthropic API
-    OPENAI = "openai"  # GPT models
+    OPENAI = "openai"  # GPT models or GLM via OpenAI-compatible API
 
 
 class LLMFactory:
@@ -34,7 +32,6 @@ class LLMFactory:
     """
 
     _providers: Dict[ModelProvider, Type[LLMInterface]] = {
-        ModelProvider.ANTHROPIC: AnthropicLLM,
         ModelProvider.OPENAI: OpenAILLM,
     }
 
@@ -113,7 +110,7 @@ class LLMFactory:
 
         Expected format:
         {
-            "provider": "anthropic" | "openai",
+            "provider": "openai",
             "api_key": "...",
             "base_url": "...",
             "model": "...",
@@ -127,7 +124,7 @@ class LLMFactory:
         Returns:
             LLMInterface instance
         """
-        provider_name = config_dict.get("provider", "anthropic")
+        provider_name = config_dict.get("provider", "openai")
         try:
             provider = ModelProvider(provider_name)
         except ValueError:
@@ -204,7 +201,7 @@ class LLMFactory:
 
 
 def create_llm(
-    provider: str | ModelProvider = ModelProvider.ANTHROPIC,
+    provider: str | ModelProvider = ModelProvider.OPENAI,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     model: Optional[str] = None,

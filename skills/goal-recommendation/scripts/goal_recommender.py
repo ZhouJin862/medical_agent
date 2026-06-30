@@ -88,17 +88,17 @@ def _call_llm(prompt: str) -> str:
     """Call LLM with prompt and return response text."""
     try:
         from src.config.settings import get_settings
-        import anthropic
+        import openai
 
         settings = get_settings()
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = openai.OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
 
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=settings.model,
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text
+        return response.choices[0].message.content
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
         return ""
@@ -214,6 +214,11 @@ def recommend_goals(input_data: Dict[str, Any]) -> Dict[str, Any]:
         "recommended_goals": goals,
         "fallback": True,
     }
+
+
+def run(input_data: dict) -> dict:
+    """Standard function interface for skill executor."""
+    return recommend_goals(input_data)
 
 
 def main():

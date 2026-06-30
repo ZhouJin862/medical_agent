@@ -27,8 +27,47 @@ from src.infrastructure.agent.state import (
     PatientContext,
     ConversationMemory,
 )
+from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Session party_id tracking (for customer change detection)
+# ---------------------------------------------------------------------------
+import json as _json
+import os as _os
+
+_SESSIONS_META_DIR = _os.path.join(settings.data_dir, "assessment_sessions")
+
+
+def _get_session_party_id(session_id: str) -> Optional[str]:
+    """Get the party_id stored in session metadata."""
+    path = _os.path.join(_SESSIONS_META_DIR, f"{session_id}.json")
+    if not _os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        return data.get("_party_id")
+    except Exception:
+        return None
+
+
+def _save_session_party_id(session_id: str, party_id: str):
+    """Save party_id to session metadata for change detection."""
+    _os.makedirs(_SESSIONS_META_DIR, exist_ok=True)
+    path = _os.path.join(_SESSIONS_META_DIR, f"{session_id}.json")
+    data = {}
+    if _os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+        except Exception:
+            pass
+    data["_party_id"] = party_id
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False)
 
 
 # Mapping from Ping An indicator names (Chinese) to skill field names.
@@ -1124,8 +1163,20 @@ async def retrieve_memory_node(state: AgentState) -> AgentState:
 
         memory_store = MemoryStore()
 
-        # Get all memories for this patient (used for user profile & vital signs extraction)
-        all_memories = await memory_store.get_all(state.patient_id)
+        # Check if party_id changed within the same session — clear old memories
+        if state.party_id and state.session_id:
+            prev_party_id = _get_session_party_id(state.session_id)
+            if prev_party_id and prev_party_id != state.party_id:
+                logger.info(
+                    f"Party_id changed in session: {prev_party_id} -> {state.party_id}, "
+                    f"clearing old memories for patient {state.patient_id}"
+                )
+                await memory_store.delete_all(state.patient_id)
+            # Save current party_id to session metadata
+            _save_session_party_id(state.session_id, state.party_id)
+
+        # Get recent memories for this patient (limit 10 to avoid context bloat)
+        all_memories = await memory_store.get_all(state.patient_id, limit=10)
 
         # Filter to current session memories for conversation context
         if state.session_id:
@@ -1135,7 +1186,7 @@ async def retrieve_memory_node(state: AgentState) -> AgentState:
             ]
             logger.info(
                 f"Filtered to {len(session_memories)} session memories "
-                f"(session_id={state.session_id}) out of {len(all_memories)} total"
+                f"(session_id={state.session_id}) out of {len(all_memories)} recent"
             )
         else:
             session_memories = all_memories
@@ -1296,7 +1347,7 @@ async def _execute_file_skill(
     """
     from pathlib import Path
 
-    skill_dir = Path("skills") / skill_name
+    skill_dir = Path(settings.skills_dir) / skill_name
     if not skill_dir.exists():
         logger.debug(f"Skill directory not found: {skill_dir}")
         return None
@@ -1445,7 +1496,7 @@ def _load_skill_knowledge(skill_name: str) -> str:
     try:
         from pathlib import Path
 
-        skill_md_path = Path("skills") / skill_name / "SKILL.md"
+        skill_md_path = Path(settings.skills_dir) / skill_name / "SKILL.md"
         if not skill_md_path.exists():
             logger.debug(f"SKILL.md not found for {skill_name}")
             return ""
@@ -1525,11 +1576,11 @@ async def _generate_llm_response(
     """
     try:
         from src.config.settings import get_settings
-        import anthropic
+        import openai
 
         settings = get_settings()
 
-        if not settings.anthropic_api_key:
+        if not settings.llm_api_key:
             # Fallback to simple response when no API key
             return _get_fallback_response(user_input, patient_id, conversation_memory, patient_context)
 
@@ -1583,10 +1634,10 @@ async def _generate_llm_response(
 
             messages = history_messages + messages
 
-        # Create Anthropic client
-        client = anthropic.Anthropic(
-            api_key=settings.anthropic_api_key,
-            base_url=settings.anthropic_base_url if settings.anthropic_base_url != "https://api.anthropic.com" else None,
+        # Create OpenAI client
+        client = openai.OpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
         )
 
         # System prompt for medical assistant with Markdown instructions
@@ -1639,15 +1690,16 @@ async def _generate_llm_response(
             system_prompt += patient_context_section
 
         # Generate response
-        response = client.messages.create(
+        # Insert system prompt into messages array for OpenAI API
+        openai_messages = [{"role": "system", "content": system_prompt}] + messages
+        response = client.chat.completions.create(
             model=settings.model,
             max_tokens=2000,
-            system=system_prompt,
-            messages=messages,
+            messages=openai_messages,
         )
 
         # Extract response text
-        response_text = response.content[0].text
+        response_text = response.choices[0].message.content
         logger.info(f"LLM response generated for patient {patient_id}")
         return response_text
 
@@ -2217,7 +2269,7 @@ def _load_field_labels() -> dict:
     try:
         from pathlib import Path
         import yaml
-        config_path = Path(__file__).resolve().parent.parent.parent.parent / "config" / "field_labels.yaml"
+        config_path = Path(settings.config_dir) / "field_labels.yaml"
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}

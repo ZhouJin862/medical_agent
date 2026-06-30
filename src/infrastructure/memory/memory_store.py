@@ -116,27 +116,54 @@ class MemoryStore:
             logger.error(f"Failed to add memory: {e}")
             raise
 
-    async def get_all(self, user_id: str) -> List[Dict[str, Any]]:
+    async def get_all(self, user_id: str, limit: int = None) -> List[Dict[str, Any]]:
         """
-        Get all memories for a user.
+        Get memories for a user, optionally limited to most recent N.
 
         Args:
             user_id: User/patient identifier
+            limit: Max number of recent memories. None = all.
 
         Returns:
             List of memory entries
         """
         try:
-            result = self.client.get_all(user_id=user_id)
+            if hasattr(self.client, 'get_all'):
+                result = self.client.get_all(user_id=user_id)
+            else:
+                result = []
 
-            # Mem0 returns a list of memory dicts
             if isinstance(result, list):
+                if limit is not None and len(result) > limit:
+                    result = result[-limit:]
                 return result
             return []
 
         except Exception as e:
             logger.error(f"Failed to get memories: {e}")
             return []
+
+    async def delete_all(self, user_id: str) -> bool:
+        """
+        Delete all memories for a user.
+
+        Args:
+            user_id: User/patient identifier
+
+        Returns:
+            True if deleted successfully
+        """
+        try:
+            if hasattr(self.client, 'delete_all'):
+                self.client.delete_all(user_id=user_id)
+            else:
+                # Fallback: delete via file store directly
+                from .file_memory_store import FileMemoryStore
+                FileMemoryStore().delete_all(user_id)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete all memories: {e}")
+            return False
 
     async def search(
         self,
@@ -237,9 +264,13 @@ class _InMemoryMemoryStore:
         # Call with positional arguments to match the signature
         return self._impl.add(message=message, user_id=user_id, metadata=metadata)
 
-    def get_all(self, user_id: str) -> List[Dict]:
-        """Get all memories for a user."""
-        return self._impl.get_all(user_id)
+    def get_all(self, user_id: str, limit: int = None) -> List[Dict]:
+        """Get memories for a user, optionally limited to most recent N."""
+        return self._impl.get_all(user_id, limit=limit)
+
+    def delete_all(self, user_id: str) -> bool:
+        """Delete all memories for a user."""
+        return self._impl.delete_all(user_id)
 
     def search(self, query: str, user_id: str = None, limit: int = 5) -> List[Dict]:
         """Search memories by query."""

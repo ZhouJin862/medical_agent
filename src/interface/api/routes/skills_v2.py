@@ -88,12 +88,12 @@ async def get_unified_repository(
     session: AsyncSession = Depends(get_db_session),
 ) -> UnifiedSkillsRepository:
     """Get unified skills repository."""
-    return UnifiedSkillsRepository(session, skills_dir="skills")
+    return UnifiedSkillsRepository(session)
 
 
 async def get_file_registry() -> SkillsRegistry:
     """Get file-based skills registry."""
-    return SkillsRegistry(skills_dir="skills")
+    return SkillsRegistry()
 
 
 # ============================================================================

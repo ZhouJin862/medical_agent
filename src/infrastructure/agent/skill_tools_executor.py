@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.config.settings import settings
+
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -278,7 +280,7 @@ def execute_skill_via_tools(
     input_data: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Execute a skill by its frontmatter `tools` declaration."""
-    skill_dir = Path("skills") / skill_name
+    skill_dir = Path(settings.skills_dir) / skill_name
     if not skill_dir.exists():
         return {"success": False, "error": f"Skill directory not found: {skill_dir}"}
 

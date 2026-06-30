@@ -457,8 +457,9 @@ def _find_skill_metadata(skill_id: str):
         Skill metadata or None if not found
     """
     from src.domain.shared.services.skills_registry import SkillsRegistry
+    from src.config.settings import settings
 
-    for skills_dir in ["skills", ".claude/skills"]:
+    for skills_dir in [settings.skills_dir, ".claude/skills"]:
         registry = SkillsRegistry(skills_dir)
         metadata = registry.get_skill_metadata(skill_id)
         if metadata:

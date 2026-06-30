@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from src.interface.api.dto.request import AssessmentRequest
+from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["assessment"])
@@ -24,7 +25,7 @@ router = APIRouter(prefix="/api/v1", tags=["assessment"])
 # ---------------------------------------------------------------------------
 # Lightweight JSON file session store for multi-turn questionnaire answers
 # ---------------------------------------------------------------------------
-_SESSIONS_DIR = os.path.join("data", "assessment_sessions")
+_SESSIONS_DIR = os.path.join(settings.data_dir, "assessment_sessions")
 
 
 def _load_session_data(session_id: str) -> dict:
@@ -97,17 +98,25 @@ async def run_assessment(request: AssessmentRequest):
         logger.warning(f"Ping An API timeout for party_id={request.party_id}")
 
     # Restore previously collected data for this session (multi-turn)
-    # Skip for re_assessment — start fresh
+    # re_assessment can come from request or from session metadata
+    prev_session = _load_session_data(session_id)
+    is_re_assessment = request.re_assessment or (prev_session.get("_re_assessment") if prev_session else False)
+
+    # Save re_assessment flag to session so subsequent requests inherit it
+    if request.re_assessment:
+        if not health_data:
+            health_data = {}
+        health_data["_re_assessment"] = True
+
     prev_data = {}
-    if request.session_id and not request.re_assessment:
-        prev_data = _load_session_data(request.session_id)
+    if request.session_id and not is_re_assessment:
+        prev_data = prev_session or {}
         if prev_data:
             if not health_data:
                 health_data = {}
             # Previous session data as base, current Ping An data overrides
             health_data = {**prev_data, **health_data}
             # Protect user-submitted answers from being blanked by Ping An API
-            # (e.g. Ping An returns gender="" but user already submitted gender="male")
             for k, v in prev_data.items():
                 if v is not None and v != "" and v != []:
                     if k in health_data and (health_data[k] is None or health_data[k] == "" or health_data[k] == []):

@@ -16,6 +16,27 @@ from src.config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
+# Module-level shared validated data registry for Phase 3 optimization.
+# Set by skills_integration.py before running insight skills in parallel,
+# consumed by _execute_workflow_skill to inject validated data into disease
+# skill input (skipping per-skill health_data_validator subprocess call).
+_shared_validated_data_registry: Dict[str, Any] = {}
+
+
+def set_shared_validated_data(session_id: str, data: Dict[str, Any]):
+    """Register shared validated data for a session."""
+    _shared_validated_data_registry[session_id] = data
+
+
+def get_shared_validated_data(session_id: str) -> Optional[Dict[str, Any]]:
+    """Get the shared validated data for a session, or None."""
+    return _shared_validated_data_registry.get(session_id)
+
+
+def clear_shared_validated_data(session_id: str):
+    """Remove the shared validated data for a session."""
+    _shared_validated_data_registry.pop(session_id, None)
+
 
 @dataclass
 class SkillSelection:
@@ -45,8 +66,8 @@ class LLMSkillSelector:
             session: Database session for unified repository
         """
         self._session = session
-        self._repository = UnifiedSkillsRepository(session, skills_dir="skills")
-        self._anthropic_api_key = get_settings().anthropic_api_key
+        self._repository = UnifiedSkillsRepository(session)
+        self._llm_api_key = get_settings().llm_api_key
 
     async def select_skill(
         self,
@@ -143,14 +164,14 @@ class LLMSkillSelector:
         Returns:
             Skill selection result
         """
-        if not self._anthropic_api_key:
+        if not self._llm_api_key:
             # Fallback to keyword matching
             return self._keyword_select(user_input, skill_descriptions)
 
         try:
-            import anthropic
+            import openai
 
-            client = anthropic.Anthropic(api_key=self._anthropic_api_key)
+            client = openai.OpenAI(api_key=self._llm_api_key, base_url=get_settings().llm_base_url)
 
             # Build system prompt (load from DB with fallback)
             from src.domain.shared.services.system_prompt_service import get_system_prompt_service
@@ -205,14 +226,17 @@ Select the most appropriate skill for this user request. Respond with JSON in th
 {user_message}"""
 
             # Call LLM
-            response = client.messages.create(
-                model="claude-sonnet-4-20250514",
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ]
+            response = client.chat.completions.create(
+                model=get_settings().model,
                 max_tokens=500,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_message}],
+                messages=messages,
             )
 
-            response_text = response.content[0].text
+            response_text = response.choices[0].message.content
 
             # Parse JSON response
             return self._parse_selection_response(response_text)
@@ -390,7 +414,7 @@ class ClaudeSkillsExecutor:
             session: Database session
         """
         self._session = session
-        self._repository = UnifiedSkillsRepository(session, skills_dir="skills")
+        self._repository = UnifiedSkillsRepository(session)
 
     async def execute_skill(
         self,
@@ -578,8 +602,9 @@ class ClaudeSkillsExecutor:
             logger.info(f"Checking workflow skill: {skill_name}, cwd: {cwd}")
 
             # Try different possible paths
+            from src.config.settings import settings
             possible_paths = [
-                Path("skills") / skill_name,  # Relative from project root
+                Path(settings.skills_dir) / skill_name,  # Configured skills dir
                 cwd / "skills" / skill_name,  # From current directory
                 cwd.parent / "skills" / skill_name,  # From src/ directory
                 Path("../skills") / skill_name,  # From src/ subdirectory
@@ -643,6 +668,22 @@ class ClaudeSkillsExecutor:
                 user_input=user_input,
                 patient_context=patient_context,
             )
+
+            # Inject shared validated data if available (Phase 3 optimization)
+            # This skips the per-skill health_data_validator subprocess call
+            _DISEASE_SKILLS_WITH_SHARED_VALIDATOR = {
+                "hypertension-risk-assessment",
+                "hyperglycemia-risk-assessment",
+                "hyperlipidemia-risk-assessment",
+                "hyperuricemia-risk-assessment",
+                "obesity-risk-assessment",
+            }
+            if skill_name in _DISEASE_SKILLS_WITH_SHARED_VALIDATOR:
+                for sid, svd in _shared_validated_data_registry.items():
+                    if svd is not None:
+                        input_data.update(svd)
+                        logger.debug(f"Injected shared validated data for {skill_name} (session={sid})")
+                        break
 
             # Execute skill in thread pool to avoid blocking
             loop = asyncio.get_event_loop()
@@ -909,18 +950,18 @@ class ClaudeSkillsExecutor:
     async def _generate_llm_response(self, prompt: str) -> str:
         """Generate LLM response."""
         try:
-            import anthropic
+            import openai
 
             settings = get_settings()
-            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            client = openai.OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
 
-            response = client.messages.create(
+            response = client.chat.completions.create(
                 model=settings.model,
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            return response.content[0].text
+            return response.choices[0].message.content
 
         except Exception as e:
             logger.error(f"Failed to generate LLM response: {e}")

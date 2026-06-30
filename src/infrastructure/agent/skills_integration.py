@@ -27,6 +27,7 @@ from src.domain.shared.models.skill_selection_models import (
     ExecutionGroup,
     MultiSkillExecutionResult,
 )
+from src.config.settings import settings
 from src.domain.shared.services.composite_skill_executor import (
     CompositeSkillExecutor,
     CompositeSkillConfig,
@@ -46,21 +47,17 @@ logger = logging.getLogger(__name__)
 # async callbacks through LangGraph's AgentState.
 _phase_callback_registry: Dict[str, Any] = {}
 
-
 def set_phase_callback(session_id: str, callback):
     """Register a phase callback for a session."""
     _phase_callback_registry[session_id] = callback
-
 
 def get_phase_callback(session_id: str):
     """Get the phase callback for a session, or None."""
     return _phase_callback_registry.get(session_id)
 
-
 def clear_phase_callback(session_id: str):
     """Remove the phase callback for a session."""
     _phase_callback_registry.pop(session_id, None)
-
 
 async def classify_intent_with_llm_node(state: AgentState) -> AgentState:
     """
@@ -173,7 +170,6 @@ async def classify_intent_with_llm_node(state: AgentState) -> AgentState:
 
     return state
 
-
 def _map_skill_to_intent(skill_name: str) -> IntentType:
     """Map skill name to intent type."""
     skill_lower = skill_name.lower()
@@ -192,7 +188,6 @@ def _map_skill_to_intent(skill_name: str) -> IntentType:
         return IntentType.SERVICE_RECOMMENDATION
     else:
         return IntentType.HEALTH_ASSESSMENT  # Default
-
 
 async def execute_claude_skill_node(state: AgentState) -> AgentState:
     """
@@ -312,7 +307,6 @@ async def execute_claude_skill_node(state: AgentState) -> AgentState:
 
     return state
 
-
 # ============================================================================
 # Package Assessment Orchestration
 # ============================================================================
@@ -325,7 +319,6 @@ _INSIGHT_SKILLS = [
     "hyperuricemia-risk-assessment",
     "obesity-risk-assessment",
 ]
-
 
 def _build_phase_markdown(phase_name: str, data: Dict[str, Any]) -> str:
     """Build markdown for a single phase section from structured_result data.
@@ -547,7 +540,6 @@ def _build_phase_markdown(phase_name: str, data: Dict[str, Any]) -> str:
 
     return "\n".join(lines) if lines else ""
 
-
 async def _execute_package_assessment(
     session, state: AgentState,
     phase_callback=None,
@@ -624,6 +616,80 @@ async def _execute_package_assessment(
                     else:
                         logger.warning("Phase 1 re-run: population_classification still empty")
 
+        # --- Optimization: shared health_data_validator ---
+        # Run health_data_validator ONCE for all disease skills, then inject
+        # the validated data into each skill's input. This eliminates 5 redundant
+        # subprocess calls (one per disease skill).
+        session_id = state.session_id if hasattr(state, 'session_id') and state.session_id else None
+        _DISEASE_SKILLS = [
+            "hypertension-risk-assessment",
+            "hyperglycemia-risk-assessment",
+            "hyperlipidemia-risk-assessment",
+            "hyperuricemia-risk-assessment",
+            "obesity-risk-assessment",
+        ]
+        from src.domain.shared.services.llm_skill_selector import (
+            set_shared_validated_data, clear_shared_validated_data,
+        )
+        try:
+            from src.infrastructure.agent.skill_md_executor import SkillWorkflowExecutor, ExecutionStep
+            from pathlib import Path
+
+            # Build input for the validator from patient_context
+            validator_input = {}
+            if state.patient_context:
+                _bi = state.patient_context.basic_info
+                if isinstance(_bi, str):
+                    try: _bi = json.loads(_bi)
+                    except (json.JSONDecodeError, TypeError): _bi = {}
+                elif not isinstance(_bi, dict): _bi = {}
+                _vs = state.patient_context.vital_signs
+                if isinstance(_vs, str):
+                    try: _vs = json.loads(_vs)
+                    except (json.JSONDecodeError, TypeError): _vs = {}
+                elif not isinstance(_vs, dict): _vs = {}
+                _mh = state.patient_context.medical_history
+                if isinstance(_mh, str):
+                    try: _mh = json.loads(_mh)
+                    except (json.JSONDecodeError, TypeError): _mh = {}
+                elif not isinstance(_mh, dict): _mh = {}
+                validator_input = {
+                    "patient_info": _bi,
+                    "health_metrics": _vs,
+                    "medical_history": _mh,
+                    **health_data,
+                }
+
+            # Execute health_data_validator directly (no longer in SKILL.md pipeline)
+            # All 5 disease skills share the same health_data_validator.py
+            validator_script = Path(settings.skills_dir) / _DISEASE_SKILLS[0] / "scripts" / "health_data_validator.py"
+            shared_validated_data = None
+            if validator_script.exists():
+                # Create a synthetic ExecutionStep to run via SkillWorkflowExecutor
+                validator_skill_dir = Path(settings.skills_dir) / _DISEASE_SKILLS[0]
+                validator_executor = SkillWorkflowExecutor(validator_skill_dir)
+                validator_step = ExecutionStep(
+                    step_number=0,
+                    title="shared_health_data_validator",
+                    command="python scripts/health_data_validator.py --input $input",
+                    script_path="scripts/health_data_validator.py",
+                    args=["--input", "$input"],
+                )
+                step_result = validator_executor.execute_step(validator_step, validator_input)
+                if step_result.get("status") == "success" and "output" in step_result:
+                    output = step_result["output"]
+                    if isinstance(output, dict):
+                        shared_validated_data = output
+                        logger.info(f"Shared health_data_validator completed: {list(output.keys())[:8]}")
+
+            if shared_validated_data:
+                set_shared_validated_data(session_id, shared_validated_data)
+                logger.info(f"Registered shared validated data for session {session_id}")
+            else:
+                logger.warning("Shared health_data_validator failed or not found, skills will run with raw input")
+        except Exception as e:
+            logger.warning(f"Shared health_data_validator pre-step failed: {e}")
+
         async def _run_insight(skill_name: str) -> tuple:
             try:
                 executor = ClaudeSkillsExecutor(session)
@@ -688,6 +754,9 @@ async def _execute_package_assessment(
         # Merge all structured_results into one combined result
         population_classification = population_result.get("population_classification", {})
         merged_sr = _merge_all_structured_results(all_structured_results, population_classification)
+
+        # Clean up shared validated data registry (no longer needed after insight skills)
+        clear_shared_validated_data(session_id)
 
         # Push abnormal_indicators once after all insight skills complete
         if phase_callback:
@@ -989,7 +1058,6 @@ async def _execute_package_assessment(
     logger.info(f"Package assessment Phase 2 complete: {len(recommended_goals)} goals recommended")
     return True
 
-
 async def _execute_single_skill_for_orchestration(
     session, state: AgentState, skill_name: str,
 ) -> Optional[Dict]:
@@ -1023,7 +1091,6 @@ async def _execute_single_skill_for_orchestration(
     except Exception as e:
         logger.error(f"Failed to execute skill {skill_name}: {e}")
         return None
-
 
 def _merge_all_structured_results(
     structured_results: list,
@@ -1098,7 +1165,6 @@ def _merge_all_structured_results(
 
     return merged
 
-
 # ---------------------------------------------------------------------------
 # Indicator normalisation
 # ---------------------------------------------------------------------------
@@ -1143,7 +1209,6 @@ def _deduplicate_indicators(indicators: list) -> list:
             seen[matched_key] = item
     return list(seen.values())
 
-
 def _deduplicate_risk_warnings(warnings: list) -> list:
     """Remove duplicate risk_warnings by title, keeping the one with highest level."""
     level_order = {"high": 0, "中高": 1, "medium": 2, "中危": 2, "low": 3, "低危": 3}
@@ -1165,7 +1230,6 @@ def _deduplicate_risk_warnings(warnings: list) -> list:
                 seen[title] = w
     return list(seen.values())
 
-
 def _deduplicate_recommended_data(items: list) -> list:
     """Remove duplicate recommended_data_collection items by item name."""
     seen: Dict[str, dict] = {}  # item name → first occurrence
@@ -1178,7 +1242,6 @@ def _deduplicate_recommended_data(items: list) -> list:
         if name not in seen:
             seen[name] = r
     return list(seen.values())
-
 
 def _normalise_indicators(indicators: list) -> list:
     """Normalise indicator items to a unified schema.
@@ -1258,7 +1321,6 @@ def _normalise_indicators(indicators: list) -> list:
         normalised.append(item)
     return normalised
 
-
 # ---------------------------------------------------------------------------
 # Prescription deduplication
 # ---------------------------------------------------------------------------
@@ -1285,7 +1347,6 @@ _PRESCRIPTION_TYPE_LABELS = {
 }
 
 _PRESCRIPTION_PRIORITY = {"high": 0, "中": 1, "medium": 1, "低": 2, "low": 2}
-
 
 def _deduplicate_prescriptions(prescriptions: list) -> list:
     """Merge prescriptions by canonical type, deduplicating content items."""
@@ -1333,7 +1394,6 @@ def _deduplicate_prescriptions(prescriptions: list) -> list:
         })
     return result
 
-
 def _extract_modules(result: Any) -> Optional[Dict]:
     """Extract modules dict from a skill execution result."""
     if isinstance(result, dict):
@@ -1342,7 +1402,6 @@ def _extract_modules(result: Any) -> Optional[Dict]:
         if "structured_output" in result and isinstance(result["structured_output"], dict):
             return result["structured_output"]
     return result if isinstance(result, dict) else None
-
 
 # ============================================================================
 # Composite Skill Support
@@ -1391,7 +1450,6 @@ async def _check_composite_skill(
         logger.error(f"Error checking composite skill: {e}")
 
     return None
-
 
 async def _execute_composite_skill(
     session,
@@ -1475,7 +1533,6 @@ async def _execute_composite_skill(
         traceback.print_exc()
         state.error_message = f"Composite skill execution failed: {str(e)}"
         return False
-
 
 async def _execute_multi_skill_plan(
     session,
@@ -1612,7 +1669,6 @@ async def _execute_multi_skill_plan(
         state.error_message = f"Multi-skill execution failed: {str(e)}"
         return False
 
-
 async def _execute_single_skill(
     session,
     state: AgentState,
@@ -1698,7 +1754,6 @@ async def _execute_single_skill(
         state.error_message = result.get("error", "Unknown error")
         return False
 
-
 # ============================================================================
 # Utility Functions
 # ============================================================================
@@ -1723,7 +1778,6 @@ def should_use_claude_skill(state: AgentState) -> bool:
         and state.confidence >= 0.5
         and state.error_message is None
     )
-
 
 def create_skills_integrated_graph():
     """
@@ -1825,7 +1879,6 @@ def create_skills_integrated_graph():
 
     logger.info("Skills-integrated agent workflow graph created successfully")
     return app
-
 
 class SkillsIntegratedAgent:
     """

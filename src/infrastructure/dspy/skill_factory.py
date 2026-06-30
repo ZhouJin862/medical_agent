@@ -112,7 +112,7 @@ class SkillFactory:
             name=config["name"],
             description=config.get("description", ""),
             signature_name=config.get("signature_name", "default"),
-            model_provider=config.get("model_provider", "anthropic"),
+            model_provider=config.get("model_provider", "openai"),
             model_config=config.get("model_config", {}),
             enabled=config.get("enabled", True),
             intent_keywords=config.get("intent_keywords", []),
@@ -129,7 +129,7 @@ class SkillFactory:
         name: str,
         description: str,
         system_prompt: str,
-        model_provider: str = "anthropic",
+        model_provider: str = "openai",
         enabled: bool = True,
     ) -> SimpleSkill:
         """

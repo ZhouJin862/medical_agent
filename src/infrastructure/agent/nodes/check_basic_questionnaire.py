@@ -474,9 +474,9 @@ async def check_basic_questionnaire_node(state: AgentState) -> AgentState:
     # missing required fields. Otherwise, return the entire questionnaire
     # (including non-required like disease-history) for new users.
     has_health_data = False
-    if state.patient_context.basic_info and state.patient_context.basic_info.get("source") == "ping_an_api":
-        # Check if any required field was actually populated from the API
-        # (API may return success for non-existent customers with empty data)
+    if state.patient_context.basic_info:
+        # Check if any required field was already populated
+        # (from any source: Ping An API, questionnaire_answers, or previous_patient_context)
         populated_count = len(required_questions) - len(missing_required_questions)
         if populated_count > 0:
             has_health_data = True

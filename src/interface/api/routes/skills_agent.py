@@ -171,7 +171,7 @@ async def get_agent_skills_status():
         from src.domain.shared.services.unified_skills_repository import UnifiedSkillsRepository
 
         async for session in get_db_session():
-            repository = UnifiedSkillsRepository(session, skills_dir="skills")
+            repository = UnifiedSkillsRepository(session)
 
             # Get all skills
             all_skills = await repository.list_skills(enabled_only=True)
@@ -226,7 +226,7 @@ async def clear_agent_cache(background_tasks: BackgroundTasks):
 
             async def clear_repo_cache():
                 async for session in get_db_session():
-                    repository = UnifiedSkillsRepository(session, skills_dir="skills")
+                    repository = UnifiedSkillsRepository(session)
                     repository.invalidate_cache()
                     break
 

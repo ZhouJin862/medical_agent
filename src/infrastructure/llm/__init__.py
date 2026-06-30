@@ -7,7 +7,6 @@ fallback and configuration-driven model selection.
 
 from .llm_interface import LLMInterface, LLMResponse, LLMConfig
 from .llm_factory import LLMFactory, ModelProvider
-from .anthropic_llm import AnthropicLLM
 from .openai_llm import OpenAILLM
 
 __all__ = [
@@ -16,6 +15,5 @@ __all__ = [
     "LLMConfig",
     "LLMFactory",
     "ModelProvider",
-    "AnthropicLLM",
     "OpenAILLM",
 ]

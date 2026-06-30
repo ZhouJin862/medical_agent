@@ -808,6 +808,12 @@ class CVDAssessmentExecutor:
 """
 
 
+def run(input_data: dict) -> dict:
+    """Standard function interface for skill executor."""
+    assessor = CVDAssessmentExecutor()
+    return assessor.assess(input_data)
+
+
 def main():
     """CLI entry point"""
     # UTF-8 encoding fix for Windows

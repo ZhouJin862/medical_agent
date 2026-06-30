@@ -532,11 +532,11 @@ async def _generate_llm_response_stream(
         Response tokens as they are generated
     """
     try:
-        import anthropic
+        import openai
 
         settings = get_settings()
 
-        if not settings.anthropic_api_key:
+        if not settings.llm_api_key:
             # Fallback response when no API key
             yield f"抱歉，系统未配置 LLM API 密钥。您的消息：{user_input}"
             return
@@ -604,21 +604,25 @@ async def _generate_llm_response_stream(
             logger.warning("No retrieved_data_info available, using base system prompt")
             system_prompt = base_system_prompt
 
-        # Create Anthropic client
-        client = anthropic.Anthropic(
-            api_key=settings.anthropic_api_key,
-            base_url=settings.anthropic_base_url if settings.anthropic_base_url != "https://api.anthropic.com" else None,
+        # Create OpenAI client
+        client = openai.OpenAI(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
         )
 
+        # Build messages with system prompt inside
+        openai_messages = [{"role": "system", "content": system_prompt}] + messages
+
         # Generate streaming response
-        with client.messages.stream(
+        response = client.chat.completions.create(
             model=settings.model,
             max_tokens=2000,
-            system=system_prompt,
-            messages=messages,
-        ) as stream:
-            for text in stream.text_stream:
-                yield text
+            messages=openai_messages,
+            stream=True,
+        )
+        for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
 
     except Exception as e:
         logger.error(f"Error generating LLM response: {e}")

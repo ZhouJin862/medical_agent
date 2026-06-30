@@ -48,7 +48,6 @@ class ModelProvider(str, Enum):
 
     INTERNAL = "internal"  # GLM-5
     OPENAI = "openai"
-    ANTHROPIC = "anthropic"
     AZURE = "azure"
 
 

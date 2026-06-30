@@ -10,11 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.database import get_db_session
 from src.domain.questionnaire.services.questionnaire_service import QuestionnaireService
+from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["questionnaire"])
 
-_SESSIONS_DIR = os.path.join("data", "assessment_sessions")
+_SESSIONS_DIR = os.path.join(settings.data_dir, "assessment_sessions")
 
 # Reverse mapping: health_data flat key → question ID
 _HEALTH_DATA_KEY_TO_QUESTION_ID: Dict[str, str] = {

@@ -10,10 +10,18 @@ import json
 import subprocess
 import tempfile
 import os
+import sys
+import io
+import importlib
+import importlib.util
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 import yaml
+
+from src.config.settings import settings
+
+logger = __import__('logging').getLogger(__name__)
 
 
 @dataclass
@@ -204,13 +212,196 @@ class SkillWorkflowExecutor:
         parser = SkillWorkflowParser(self.skill_md)
         return parser.parse_execution_steps()
 
+    def _execute_step_direct(
+        self,
+        step: ExecutionStep,
+        input_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute step via direct Python import instead of subprocess.
+
+        This eliminates subprocess startup overhead (~0.5-1s per call).
+        The script is loaded via importlib.util. If the module exposes a
+        ``run(input_data: dict) -> dict`` function, it is called directly
+        (no sys.argv / sys.stdout / temp-file manipulation). Otherwise,
+        the old CLI-emulation path is used as a fallback.
+
+        Args:
+            step: Execution step to run
+            input_data: Input data dict (written to temp JSON file)
+
+        Returns:
+            Step result dict with status, output, etc.
+        """
+        script_full_path = self.scripts_dir / step.script_path
+        if not script_full_path.exists():
+            return {
+                "step": step.step_number,
+                "title": step.title,
+                "status": "error",
+                "error": f"Script not found: {script_full_path}",
+            }
+
+        # Load module
+        module_name = f"skill_script_{step.step_number}_{script_full_path.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, str(script_full_path))
+        module = importlib.util.module_from_spec(spec)
+
+        # Add script's directory to sys.path so sibling imports work
+        script_dir_str = str(script_full_path.parent)
+        path_inserted = False
+        if script_dir_str not in sys.path:
+            sys.path.insert(0, script_dir_str)
+            path_inserted = True
+
+        try:
+            spec.loader.exec_module(module)
+        except Exception as e:
+            logger.warning(f"Failed to load module {script_full_path}: {e}")
+            return {
+                "step": step.step_number,
+                "title": step.title,
+                "status": "error",
+                "error": str(e),
+            }
+        finally:
+            if path_inserted:
+                try:
+                    sys.path.remove(script_dir_str)
+                except ValueError:
+                    pass
+
+        # --- Preferred path: call run(input_data) if available ---
+        run_func = getattr(module, 'run', None)
+        if run_func and callable(run_func):
+            try:
+                output = run_func(input_data)
+                return {
+                    "step": step.step_number,
+                    "title": step.title,
+                    "status": "success",
+                    "output": output,
+                }
+            except Exception as e:
+                logger.warning(f"run() failed for {step.script_path}: {e}")
+                return {
+                    "step": step.step_number,
+                    "title": step.title,
+                    "status": "error",
+                    "error": str(e),
+                }
+
+        # --- Fallback: old CLI emulation (sys.argv + sys.stdout + temp file) ---
+        logger.info(f"No run() in {step.script_path}, falling back to CLI emulation")
+
+        # Write input to temp file (scripts expect --input file.json)
+        temp_input = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.json', delete=False, encoding='utf-8'
+        )
+        try:
+            json.dump(input_data, temp_input, ensure_ascii=False, indent=2)
+            temp_input.close()
+
+            argv_backup = sys.argv[:]
+            stdout_backup = sys.stdout
+            try:
+                # Build argv simulation: script path + --input + flags
+                sys.argv = [str(script_full_path)]
+                for arg in step.args:
+                    if arg == "$input" or arg == "$prev_output":
+                        sys.argv.extend(['--input', temp_input.name])
+                    elif arg in ('--input', '--output'):
+                        pass
+                    elif arg.startswith('--'):
+                        sys.argv.append(arg)
+                    elif not arg.startswith('$') and not arg.startswith('<'):
+                        sys.argv.append(arg)
+                if '--input' not in sys.argv:
+                    sys.argv.extend(['--input', temp_input.name])
+
+                # Capture stdout
+                captured = io.StringIO()
+                sys.stdout = captured
+
+                # Call the script's main() function directly
+                # (module already loaded above)
+                main_func = getattr(module, 'main', None)
+                if main_func and callable(main_func):
+                    ret = main_func()
+                    # Scripts return 0 on success, non-zero on error
+                    if ret is not None and ret != 0:
+                        return {
+                            "step": step.step_number,
+                            "title": step.title,
+                            "status": "error",
+                            "error": f"Script main() returned {ret}",
+                        }
+
+                # Parse stdout as JSON
+                output_str = captured.getvalue().strip()
+                try:
+                    output = json.loads(output_str)
+                except json.JSONDecodeError:
+                    output = {"raw_output": output_str}
+
+                return {
+                    "step": step.step_number,
+                    "title": step.title,
+                    "status": "success",
+                    "output": output,
+                }
+            except (SystemExit, Exception) as e:
+                # SystemExit is raised by scripts calling sys.exit(main())
+                # Treat SystemExit(0) as success, SystemExit(1) as error
+                if isinstance(e, SystemExit):
+                    if e.code == 0:
+                        # Script exited successfully — parse captured stdout
+                        output_str = captured.getvalue().strip()
+                        try:
+                            output = json.loads(output_str)
+                        except json.JSONDecodeError:
+                            output = {"raw_output": output_str}
+                        return {
+                            "step": step.step_number,
+                            "title": step.title,
+                            "status": "success",
+                            "output": output,
+                        }
+                    else:
+                        logger.warning(f"Direct import for {step.script_path} exited with code {e.code}")
+                        return {
+                            "step": step.step_number,
+                            "title": step.title,
+                            "status": "error",
+                            "error": f"Script exited with code {e.code}",
+                        }
+                logger.warning(f"Direct import failed for {step.script_path}: {e}")
+                return {
+                    "step": step.step_number,
+                    "title": step.title,
+                    "status": "error",
+                    "error": str(e),
+                }
+            finally:
+                sys.argv = argv_backup
+                sys.stdout = stdout_backup
+        finally:
+            try:
+                Path(temp_input.name).unlink()
+            except:
+                pass
+
     def execute_step(
         self,
         step: ExecutionStep,
         input_data: Dict[str, Any],
         env: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
-        """执行单个步骤"""
+        """执行单个步骤
+
+        By default, tries direct Python import execution first (no subprocess
+        overhead). Falls back to subprocess if direct import fails or if
+        the SKILL_SUBPROCESS=1 env var is set.
+        """
         if not step.script_path:
             return {
                 "step": step.step_number,
@@ -228,6 +419,17 @@ class SkillWorkflowExecutor:
                 "status": "error",
                 "error": f"Script not found: {script_full_path}"
             }
+
+        # Try direct import first (faster, no subprocess overhead)
+        use_subprocess = os.environ.get("SKILL_SUBPROCESS", "0") == "1"
+        if not use_subprocess:
+            result = self._execute_step_direct(step, input_data)
+            if result.get("status") != "error":
+                return result
+            # Fallback to subprocess on error
+            logger.warning(f"Direct import failed for {step.script_path}, falling back to subprocess")
+
+        # Subprocess execution (original path)
 
         # 创建临时输入文件
         temp_input = tempfile.NamedTemporaryFile(
@@ -462,7 +664,7 @@ def execute_skill_via_skill_md(
     Returns:
         执行结果
     """
-    skill_dir = Path("skills") / skill_name
+    skill_dir = Path(settings.skills_dir) / skill_name
 
     if not skill_dir.exists():
         return {

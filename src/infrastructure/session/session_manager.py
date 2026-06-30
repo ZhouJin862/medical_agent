@@ -14,14 +14,12 @@ from pathlib import Path
 from dataclasses import dataclass, field, asdict
 
 from src.infrastructure.memory import MemoryStore
+from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# Directory for session persistence - use absolute path from project root
-# Get the project root directory (parent of src directory)
-_CURRENT_FILE = Path(__file__).resolve()
-_PROJECT_ROOT = _CURRENT_FILE.parent.parent.parent.parent
-_SESSIONS_DIR = _PROJECT_ROOT / "data" / "sessions"
+# Directory for session persistence - configured via DATA_DIR env var
+_SESSIONS_DIR = Path(settings.data_dir) / "sessions"
 _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(f"Sessions directory: {_SESSIONS_DIR}")
 
